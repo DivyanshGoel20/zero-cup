@@ -1,296 +1,436 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { setupDeck } from "@/lib/game/engine";
-import { DETECTIVES, ROOMS, WEAPONS, STARTING_POSITIONS, ROOM_BY_ID } from "@/lib/game/constants";
-import { findPath } from "@/lib/game/board";
-import { generateKeyPair, encryptPayload, buildCluePayload } from "@/lib/crypto/hybrid";
-import type { Envelope, Card, Position, DetectiveId, RoomId } from "@/lib/game/types";
+import { useGameStore } from "@/lib/store/gameStore";
+import { useUIStore, type ActivePanel } from "@/lib/store/uiStore";
+import { Header } from "./components/ui/Header";
+import { GameBoard } from "./components/board/GameBoard";
+import { DiceDisplay } from "./components/ui/DiceDisplay";
+import { ActivityFeed } from "./components/spectator/ActivityFeed";
+import { SuspicionMeter } from "./components/spectator/SuspicionMeter";
+import { DetectiveCard } from "./components/spectator/DetectiveCard";
+import { LedgerPanel } from "./components/spectator/LedgerPanel";
+import { DETECTIVES, DETECTIVE_BY_ID } from "@/lib/game/constants";
+import type { DetectiveId, WeaponId } from "@/lib/game/types";
+import { runDeductionAnalysis } from "@/lib/game/deduction";
+import { motion, AnimatePresence } from "framer-motion";
+import { Shield, Trophy, Activity, Users, HelpCircle, AlertTriangle } from "lucide-react";
 
 export default function Home() {
-  const [loading, setLoading] = useState(true);
-  const [envelope, setEnvelope] = useState<Envelope | null>(null);
-  const [hands, setHands] = useState<Record<string, Card[]>>({});
-  const [cryptoTest, setCryptoTest] = useState<{
-    pubKey: string;
-    privKey: string;
-    plaintext: string;
-    ciphertext: string;
-  } | null>(null);
+  const {
+    status,
+    actionState,
+    detectives,
+    detectiveOrder,
+    currentDetectiveIndex,
+    diceRoll,
+    movementPath,
+    movementStep,
+    notebooks,
+    confidence,
+    log,
+    winner,
+    envelope,
+    initGame,
+    rollDiceAction,
+    stepMovement,
+    makeSuggestion,
+    makeAccusation,
+    advanceTurn,
+  } = useGameStore();
 
-  // Pathfinding demo state
-  const [selectedDetective, setSelectedDetective] = useState<DetectiveId>("VANCE");
-  const [selectedRoom, setSelectedRoom] = useState<RoomId>("GRAND_FOYER");
-  const [calculatedPath, setCalculatedPath] = useState<Position[] | null>(null);
+  const {
+    gameSpeed,
+    msPerStep,
+    activePanel,
+    isDiceAnimating,
+    setDiceAnimating,
+    setActivePanel,
+    showWinnerReveal,
+    setShowWinnerReveal,
+  } = useUIStore();
 
+  const [loadingKeys, setLoadingKeys] = useState(false);
+
+  // 1. Automatically initialize game if initializing
   useEffect(() => {
-    async function runValidation() {
-      // 1. Test Deck Setup & Envelope Deal
-      const detectiveIds = DETECTIVES.map((d) => d.id);
-      const deal = setupDeck(detectiveIds);
-      setEnvelope(deal.envelope);
-      setHands(deal.hands);
-
-      // 2. Test Cryptography Module
-      const keys = await generateKeyPair();
-      const samplePayload = buildCluePayload({
-        gameId: "test-game-12345",
-        round: 1,
-        revealingAgentId: "ROSEWOOD",
-        receivingAgentId: "VANCE",
-        cardType: "weapon",
-        cardId: "PEARL_PISTOL",
-        cardName: "Pearl-handled Pistol",
-      });
-      const encrypted = await encryptPayload(samplePayload, keys.publicKey);
-
-      setCryptoTest({
-        pubKey: keys.publicKey,
-        privKey: keys.privateKey,
-        plaintext: JSON.stringify(samplePayload, null, 2),
-        ciphertext: encrypted,
-      });
-
-      setLoading(false);
+    if (status === "initializing") {
+      initGame();
     }
-    runValidation();
-  }, []);
+  }, [status, initGame]);
 
-  // Update path calculation when selection changes
+  // 2. Generate RSA Keypairs for all agents using Phase 1 crypto
   useEffect(() => {
-    const start = STARTING_POSITIONS[selectedDetective];
-    const room = ROOM_BY_ID[selectedRoom];
-    if (start && room && room.doors.length > 0) {
-      // Direct path to the first door of the target room
-      const targetDoor = room.doors[0];
-      const path = findPath(start, targetDoor);
-      setCalculatedPath(path);
+    if (status === "playing" && detectives.length > 0 && detectives.some((d) => !d.publicKey) && !loadingKeys) {
+      const initKeys = async () => {
+        setLoadingKeys(true);
+        const { generateKeyPair } = await import("@/lib/crypto/hybrid");
+        const updated = await Promise.all(
+          detectives.map(async (d) => {
+            if (d.publicKey) return d;
+            try {
+              const keys = await generateKeyPair();
+              return { ...d, publicKey: keys.publicKey };
+            } catch (err) {
+              console.error("Failed to generate keys for " + d.id, err);
+              return { ...d, publicKey: "0g:mock_key_pair_" + d.id.toLowerCase() };
+            }
+          })
+        );
+        useGameStore.setState({ detectives: updated });
+        setLoadingKeys(false);
+      };
+      initKeys();
     }
-  }, [selectedDetective, selectedRoom]);
+  }, [status, detectives, loadingKeys]);
 
-  if (loading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center bg-[#080b14] text-[#f1f5f9]">
-        <div className="text-center">
-          <div className="h-10 w-10 animate-spin rounded-full border-4 border-[#b89255] border-t-transparent mx-auto"></div>
-          <p className="mt-4 text-[#94a3b8] font-mono">Analyzing Ashford Manor evidence...</p>
-        </div>
-      </div>
-    );
-  }
+  // 3. Automatic simulation loop
+  useEffect(() => {
+    if (status !== "playing") return;
+
+    let timer: NodeJS.Timeout;
+
+    if (actionState === "idle") {
+      // Step A: Wait briefly, then animate & roll dice
+      timer = setTimeout(() => {
+        setDiceAnimating(true);
+        // Wait 700ms for dice animation, then complete roll
+        timer = setTimeout(() => {
+          setDiceAnimating(false);
+          rollDiceAction();
+        }, 700);
+      }, msPerStep * 2.5);
+    } else if (actionState === "moving") {
+      // Step B: Traverse path step-by-step
+      timer = setTimeout(() => {
+        stepMovement();
+      }, msPerStep);
+    } else if (actionState === "suggesting") {
+      // Step C: Choose and process suggestion
+      timer = setTimeout(() => {
+        const activeId = detectiveOrder[currentDetectiveIndex];
+        const detective = detectives.find((d) => d.id === activeId)!;
+        const notebook = notebooks[activeId];
+
+        if (detective.currentRoom && notebook) {
+          // Find candidates that aren't ruled out in this agent's notebook
+          const possibleSuspects = (Object.keys(notebook.suspects) as DetectiveId[]).filter(
+            (id) => notebook.suspects[id] === "POSSIBLE"
+          );
+          const possibleWeapons = (Object.keys(notebook.weapons) as WeaponId[]).filter(
+            (id) => notebook.weapons[id] === "POSSIBLE"
+          );
+
+          const suspect = possibleSuspects[Math.floor(Math.random() * possibleSuspects.length)] || "VANCE";
+          const weapon = possibleWeapons[Math.floor(Math.random() * possibleWeapons.length)] || "PEARL_PISTOL";
+
+          makeSuggestion({
+            suspect,
+            weapon,
+            room: detective.currentRoom,
+          });
+        } else {
+          // Fallback if not in a room
+          makeSuggestion({
+            suspect: "VANCE",
+            weapon: "PEARL_PISTOL",
+            room: "GRAND_FOYER",
+          });
+        }
+      }, msPerStep * 4);
+    } else if (actionState === "accusing") {
+      // Step D: Solve and execute final accusation
+      timer = setTimeout(() => {
+        const activeId = detectiveOrder[currentDetectiveIndex];
+        const notebook = notebooks[activeId];
+        if (notebook) {
+          const solution = runDeductionAnalysis(notebook);
+          if (solution) {
+            makeAccusation(solution);
+          } else {
+            advanceTurn();
+          }
+        }
+      }, msPerStep * 5);
+    } else if (actionState === "next_turn_pending") {
+      // Step E: Wait before moving to next player
+      timer = setTimeout(() => {
+        advanceTurn();
+      }, msPerStep * 3);
+    }
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [
+    status,
+    actionState,
+    currentDetectiveIndex,
+    movementStep,
+    msPerStep,
+    detectives,
+    detectiveOrder,
+    notebooks,
+    rollDiceAction,
+    stepMovement,
+    makeSuggestion,
+    makeAccusation,
+    advanceTurn,
+    setDiceAnimating,
+  ]);
+
+  // 4. Trigger modal reveal when game finishes
+  useEffect(() => {
+    if (status === "finished" && winner) {
+      setShowWinnerReveal(true);
+    }
+  }, [status, winner, setShowWinnerReveal]);
+
+  // Helper for current active detective
+  const activeDetectiveId = detectiveOrder[currentDetectiveIndex];
+  const activeDetective = detectives.find((d) => d.id === activeDetectiveId);
+
+  // Status message text
+  const getStatusMessage = () => {
+    if (status === "finished") {
+      return winner
+        ? `${DETECTIVE_BY_ID[winner]?.name} solved the murder!`
+        : "All detectives eliminated. Ashford Manor remains a mystery.";
+    }
+    if (!activeDetective) return "Initializing board...";
+
+    switch (actionState) {
+      case "idle":
+        return `Awaiting roll for ${activeDetective.name}...`;
+      case "rolling":
+        return `${activeDetective.name} is shaking the dice...`;
+      case "moving":
+        return `${activeDetective.name} is walking hallways (${movementStep}/${movementPath.length - 1})...`;
+      case "suggesting":
+        return `${activeDetective.name} is gathering clues in the ${activeDetective.currentRoom?.replace(/_/g, " ")}...`;
+      case "accusing":
+        return `⚠️ ${activeDetective.name} is preparing a final accusation!`;
+      case "next_turn_pending":
+        return `Turn complete. Awaiting next investigator...`;
+      default:
+        return "Game in progress...";
+    }
+  };
 
   return (
     <div className="flex flex-col min-h-screen bg-[#080b14] text-[#f1f5f9] font-sans selection:bg-[#b89255] selection:text-black">
-      {/* Top Header */}
-      <header className="border-b border-white/5 bg-[#0d1117] py-6 px-8 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <div className="wax-seal"></div>
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight text-[#b89255]">Ashford Manor Mystery</h1>
-            <p className="text-xs text-[#94a3b8] font-mono">Game Engine & Cryptography Console (Phase 1)</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-3">
-          <span className="flex h-2 w-2 rounded-full bg-[#10b981] animate-pulse"></span>
-          <span className="text-xs font-mono text-[#10b981]">Phase 1 Active & Validated</span>
-        </div>
-      </header>
+      {/* Header bar */}
+      <Header />
 
-      {/* Main Container */}
-      <main className="flex-1 p-8 grid grid-cols-1 xl:grid-cols-3 gap-8">
+      {/* Main content grid */}
+      <main className="flex-1 p-4 md:p-6 lg:p-8 max-w-7xl mx-auto w-full grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
         
-        {/* Column 1: Case Envelope & Card Hands */}
-        <section className="xl:col-span-1 flex flex-col gap-6">
-          <div className="manila-dossier p-6 shadow-xl flex-1 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between border-b border-[#8a6a30]/30 pb-4 mb-4">
-                <h2 className="text-lg font-bold uppercase tracking-wider text-[#1c1d22]">Case File: Dealt Hands</h2>
-                <span className="text-xs font-mono bg-[#8a6a30]/20 px-2 py-0.5 rounded text-[#1c1d22]">Setup deck</span>
+        {/* Left Column: Board (Span 2) */}
+        <section className="lg:col-span-2 flex flex-col gap-6">
+          <div className="glass-panel p-4 md:p-6 shadow-2xl flex flex-col items-center">
+            {/* Active turn header */}
+            <div className="w-full flex items-center justify-between border-b border-white/5 pb-3 mb-4 text-xs font-mono">
+              <div className="flex items-center gap-2">
+                <span className="flex h-2 w-2 rounded-full bg-[#b89255] animate-pulse" />
+                <span className="text-[#94a3b8]">Rival Investigation Status</span>
               </div>
-
-              {/* Envelope */}
-              {envelope && (
-                <div className="bg-[#1c1d22]/5 p-4 rounded border border-[#8a6a30]/20 mb-6">
-                  <h3 className="text-xs font-bold uppercase text-[#8a6a30] mb-2 tracking-wide">Confidential Envelope</h3>
-                  <div className="grid grid-cols-3 gap-2 text-center text-xs font-mono">
-                    <div className="bg-[#1c1d22] text-[#f43f5e] p-2 rounded border border-[#8a6a30]/20">
-                      <span className="block text-[10px] text-gray-500">Suspect</span>
-                      {envelope.suspect}
-                    </div>
-                    <div className="bg-[#1c1d22] text-[#06b6d4] p-2 rounded border border-[#8a6a30]/20">
-                      <span className="block text-[10px] text-gray-500">Weapon</span>
-                      {envelope.weapon}
-                    </div>
-                    <div className="bg-[#1c1d22] text-[#b89255] p-2 rounded border border-[#8a6a30]/20">
-                      <span className="block text-[10px] text-gray-500">Room</span>
-                      {envelope.room}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* Dealt Hands */}
-              <div className="space-y-4">
-                <h3 className="text-xs font-bold uppercase text-[#1c1d22] tracking-wide">Hands Distributed</h3>
-                {DETECTIVES.map((det) => (
-                  <div key={det.id} className="bg-[#1c1d22]/5 p-3 rounded border border-black/5 flex flex-col gap-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="h-2 w-2 rounded-full" style={{ backgroundColor: det.color }} />
-                      <span className="text-sm font-bold text-[#1c1d22]">{det.name}</span>
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {hands[det.id]?.map((card) => (
-                        <span
-                          key={card.id}
-                          className="text-[10px] font-mono bg-[#1c1d22] text-[#f1f5f9] px-2 py-0.5 rounded border border-white/5"
-                        >
-                          {card.name}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="mt-6 text-[10px] text-[#8a6a30] text-center border-t border-[#8a6a30]/20 pt-4 font-mono">
-               Ashcroft Manor Records — Classified
-            </div>
-          </div>
-        </section>
-
-        {/* Column 2: Cryptography & Security Layer */}
-        <section className="xl:col-span-1 flex flex-col gap-6">
-          <div className="glass-panel p-6 shadow-xl flex-1 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between border-b border-white/5 pb-4 mb-4">
-                <h2 className="text-lg font-bold tracking-tight text-[#b89255]">Crypto Validation</h2>
-                <span className="text-xs font-mono bg-white/5 px-2 py-0.5 rounded text-[#94a3b8]">RSA + AES</span>
-              </div>
-
-              {cryptoTest && (
-                <div className="space-y-4">
-                  <div>
-                    <h3 className="text-xs font-bold uppercase text-[#94a3b8] mb-1.5 font-mono">1. Public Key (Inspector Vance)</h3>
-                    <div className="bg-[#080b14] p-3 rounded border border-white/5 font-mono text-[10px] text-[#06b6d4] break-all max-h-16 overflow-y-auto">
-                      {cryptoTest.pubKey}
-                    </div>
-                  </div>
-
-                  <div>
-                    <h3 className="text-xs font-bold uppercase text-[#94a3b8] mb-1.5 font-mono">2. Raw Clue Envelope (Plaintext JSON)</h3>
-                    <pre className="bg-[#080b14] p-3 rounded border border-white/5 font-mono text-[10px] text-[#f43f5e] overflow-x-auto max-h-36">
-                      {cryptoTest.plaintext}
-                    </pre>
-                  </div>
-
-                  <div>
-                    <h3 className="text-xs font-bold uppercase text-[#94a3b8] mb-1.5 font-mono">3. Encrypted Clue Bundle (Base64 Cipher)</h3>
-                    <div className="bg-[#080b14] p-3 rounded border border-white/5 font-mono text-[10px] text-amber-500 break-all max-h-24 overflow-y-auto">
-                      {cryptoTest.ciphertext}
-                    </div>
-                  </div>
-                </div>
+              {activeDetective && (
+                <span style={{ color: activeDetective.color }} className="font-bold">
+                  {activeDetective.name}&apos;s Move
+                </span>
               )}
             </div>
 
-            <div className="bg-[#10b981]/5 border border-[#10b981]/10 p-3 rounded flex items-start gap-2.5 mt-6 text-xs text-[#10b981] font-mono">
-              <span className="h-1.5 w-1.5 rounded-full bg-[#10b981] mt-1.5"></span>
-              <span>Web Crypto API verification successful. Payloads protected against brute-force entropy attacks.</span>
+            {/* Board renderer */}
+            <div className="w-full max-w-[500px]">
+              <GameBoard
+                detectives={detectives}
+                activeDetectiveId={activeDetectiveId}
+                highlightedCells={actionState === "moving" ? movementPath : []}
+              />
+            </div>
+
+            {/* Turn status block */}
+            <div className="w-full mt-6 bg-white/[0.02] border border-white/5 rounded-xl p-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-[10px] text-[#475569] uppercase font-bold tracking-wider font-mono">
+                  Current Action
+                </div>
+                <h3 className="text-sm font-semibold text-[#f1f5f9] mt-0.5 font-sans leading-snug">
+                  {getStatusMessage()}
+                </h3>
+              </div>
+
+              {/* Dice box */}
+              <div className="shrink-0">
+                <DiceDisplay
+                  value={diceRoll}
+                  isAnimating={isDiceAnimating}
+                  onRoll={rollDiceAction}
+                  disabled={actionState !== "idle" || status !== "playing"}
+                  speed={gameSpeed}
+                />
+              </div>
             </div>
           </div>
         </section>
 
-        {/* Column 3: Board Geometry & BFS Pathfinding */}
-        <section className="xl:col-span-1 flex flex-col gap-6">
-          <div className="glass-panel p-6 shadow-xl flex-1 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between border-b border-white/5 pb-4 mb-4">
-                <h2 className="text-lg font-bold tracking-tight text-[#b89255]">BFS Pathfinding Tester</h2>
-                <span className="text-xs font-mono bg-white/5 px-2 py-0.5 rounded text-[#94a3b8]">12x12 grid</span>
-              </div>
+        {/* Right Column: Spectator Panels (Span 1) */}
+        <section className="lg:col-span-1 h-full flex flex-col gap-6">
+          <div className="glass-panel shadow-xl flex-1 flex flex-col min-h-[580px] max-h-[700px]">
+            {/* Panel Tabs Header */}
+            <div className="flex border-b border-white/5 bg-black/10 rounded-t-2xl">
+              {(["feed", "suspicion", "detectives", "ledger"] as const).map((tab) => {
+                const getTabDetails = (t: typeof tab) => {
+                  switch (t) {
+                    case "feed":
+                      return { label: "Events", icon: Activity };
+                    case "suspicion":
+                      return { label: "Confidence", icon: HelpCircle };
+                    case "detectives":
+                      return { label: "Dossiers", icon: Users };
+                    case "ledger":
+                      return { label: "0G Ledger", icon: Shield };
+                  }
+                };
+                const details = getTabDetails(tab);
+                const Icon = details.icon;
 
-              {/* Selector */}
-              <div className="grid grid-cols-2 gap-4 mb-6">
-                <div>
-                  <label className="block text-xs font-mono text-[#94a3b8] mb-1.5 uppercase">Detective</label>
-                  <select
-                    value={selectedDetective}
-                    onChange={(e) => setSelectedDetective(e.target.value as DetectiveId)}
-                    className="w-full bg-[#080b14] border border-white/10 rounded px-2.5 py-1.5 text-xs text-[#f1f5f9] focus:outline-none focus:border-[#b89255]"
+                return (
+                  <button
+                    key={tab}
+                    onClick={() => setActivePanel(tab)}
+                    className={`flex-1 py-3 flex flex-col items-center gap-1 text-[10px] uppercase font-semibold font-mono tracking-wider transition-colors border-b-2 ${
+                      activePanel === tab
+                        ? "text-[#b89255] border-[#b89255] bg-white/[0.01]"
+                        : "text-[#475569] border-transparent hover:text-[#94a3b8]"
+                    }`}
                   >
-                    {DETECTIVES.map((det) => (
-                      <option key={det.id} value={det.id}>
-                        {det.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-mono text-[#94a3b8] mb-1.5 uppercase">Target Room</label>
-                  <select
-                    value={selectedRoom}
-                    onChange={(e) => setSelectedRoom(e.target.value as RoomId)}
-                    className="w-full bg-[#080b14] border border-white/10 rounded px-2.5 py-1.5 text-xs text-[#f1f5f9] focus:outline-none focus:border-[#b89255]"
-                  >
-                    {ROOMS.map((room) => (
-                      <option key={room.id} value={room.id}>
-                        {room.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              {/* Coordinates details */}
-              <div className="space-y-4">
-                <div className="flex justify-between items-center bg-[#080b14] p-3 rounded border border-white/5 text-xs">
-                  <span className="text-[#94a3b8]">Start position:</span>
-                  <span className="font-mono text-violet-400">
-                    ({STARTING_POSITIONS[selectedDetective].x}, {STARTING_POSITIONS[selectedDetective].y})
-                  </span>
-                </div>
-                <div className="flex justify-between items-center bg-[#080b14] p-3 rounded border border-white/5 text-xs">
-                  <span className="text-[#94a3b8]">Door coordinate:</span>
-                  <span className="font-mono text-emerald-400">
-                    ({ROOM_BY_ID[selectedRoom].doors[0]?.x}, {ROOM_BY_ID[selectedRoom].doors[0]?.y})
-                  </span>
-                </div>
-
-                {/* Path display */}
-                <div>
-                  <h3 className="text-xs font-bold uppercase text-[#94a3b8] mb-1.5 font-mono">Calculated Shortest Path</h3>
-                  {calculatedPath ? (
-                    <div className="bg-[#080b14] p-3 rounded border border-white/5 max-h-40 overflow-y-auto">
-                      <div className="text-xs text-[#10b981] mb-2 font-mono">
-                        Path found: {calculatedPath.length - 1} steps
-                      </div>
-                      <div className="flex flex-col gap-1 text-[10px] font-mono text-gray-400">
-                        {calculatedPath.map((step, idx) => (
-                          <div key={idx} className="flex justify-between border-b border-white/5 pb-1">
-                            <span>Step {idx}:</span>
-                            <span className="text-white">({step.x}, {step.y})</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="bg-red-950/20 border border-red-900/30 p-3 rounded text-xs text-red-400 font-mono">
-                      No path found. The target room is blocked or doors are unreachable.
-                    </div>
-                  )}
-                </div>
-              </div>
+                    <Icon className="w-4 h-4 shrink-0" />
+                    <span>{details.label}</span>
+                  </button>
+                );
+              })}
             </div>
 
-            <div className="bg-[#06b6d4]/5 border border-[#06b6d4]/10 p-3 rounded flex items-start gap-2.5 mt-6 text-xs text-[#06b6d4] font-mono">
-              <span className="h-1.5 w-1.5 rounded-full bg-[#06b6d4] mt-1.5"></span>
-              <span>BFS logic active. Pawns navigate the hallways and entryways step-by-step without diagonal hacks.</span>
+            {/* Panel body container */}
+            <div className="flex-1 overflow-hidden">
+              {activePanel === "feed" && <ActivityFeed log={log} />}
+              {activePanel === "suspicion" && (
+                <SuspicionMeter
+                  confidence={confidence}
+                  activeDetectiveId={activeDetectiveId}
+                  eliminatedIds={detectives.filter((d) => d.eliminated).map((d) => d.id)}
+                />
+              )}
+              {activePanel === "detectives" && (
+                <div className="overflow-y-auto h-full p-4 space-y-4">
+                  {detectives.map((det) => (
+                    <DetectiveCard
+                      key={det.id}
+                      detective={det}
+                      isActive={det.id === activeDetectiveId}
+                      notebook={notebooks[det.id]}
+                      confidence={confidence[det.id] ?? 0}
+                    />
+                  ))}
+                </div>
+              )}
+              {activePanel === "ledger" && <LedgerPanel log={log} />}
             </div>
           </div>
         </section>
-
       </main>
+
+      {/* Winner Reveal Modal Overlay */}
+      <AnimatePresence>
+        {showWinnerReveal && winner && envelope && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-md">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="max-w-md w-full bg-[#0d1117] border border-[#b89255] rounded-2xl shadow-[0_0_50px_rgba(184,146,85,0.3)] overflow-hidden"
+            >
+              {/* Header */}
+              <div className="bg-gradient-to-b from-[#b89255]/20 to-transparent p-6 text-center border-b border-white/5 relative">
+                <Trophy className="w-16 h-16 mx-auto text-[#b89255] animate-bounce" />
+                <h2 className="text-xl font-bold mt-4 text-[#b89255] uppercase tracking-wide">
+                  Case Solved!
+                </h2>
+                <p className="text-xs text-[#94a3b8] font-mono mt-1">
+                  Ashford Manor Mystery concluded
+                </p>
+              </div>
+
+              {/* Envelope details */}
+              <div className="p-6 space-y-6">
+                <div className="text-center bg-[#111827] border border-white/5 rounded-xl p-4">
+                  <h3 className="text-xs font-bold text-[#b89255] font-mono uppercase tracking-wider mb-3">
+                    The Confidential Case File
+                  </h3>
+                  <div className="grid grid-cols-3 gap-2.5 text-center text-xs font-mono font-bold">
+                    <div className="bg-[#080b14] border border-red-900/30 p-2.5 rounded text-[#f43f5e]">
+                      <span className="block text-[8px] text-[#475569] font-medium uppercase mb-1">Suspect</span>
+                      {DETECTIVE_BY_ID[envelope.suspect]?.name || envelope.suspect}
+                    </div>
+                    <div className="bg-[#080b14] border border-cyan-900/30 p-2.5 rounded text-[#06b6d4]">
+                      <span className="block text-[8px] text-[#475569] font-medium uppercase mb-1">Weapon</span>
+                      {envelope.weapon.replace(/_/g, " ")}
+                    </div>
+                    <div className="bg-[#080b14] border border-amber-900/30 p-2.5 rounded text-[#b89255]">
+                      <span className="block text-[8px] text-[#475569] font-medium uppercase mb-1">Room</span>
+                      {envelope.room.replace(/_/g, " ")}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Winner stats */}
+                <div className="flex items-center gap-4 bg-[#10b981]/5 border border-[#10b981]/10 rounded-xl p-4 text-xs font-mono">
+                  <div
+                    className="w-12 h-12 rounded-lg flex items-center justify-center font-bold text-xl shrink-0"
+                    style={{
+                      background: `linear-gradient(135deg, ${DETECTIVE_BY_ID[winner]?.color}44 0%, ${DETECTIVE_BY_ID[winner]?.color}22 100%)`,
+                      border: `1px solid ${DETECTIVE_BY_ID[winner]?.color}66`,
+                      color: DETECTIVE_BY_ID[winner]?.color,
+                    }}
+                  >
+                    {winner.charAt(0)}
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-[#475569] uppercase font-bold">Winner</div>
+                    <h4 className="text-sm font-bold text-[#10b981]">
+                      {DETECTIVE_BY_ID[winner]?.name}
+                    </h4>
+                    <p className="text-[10px] text-[#94a3b8] mt-0.5 leading-snug">
+                      Solved the case with 100% confidence. Ledger records uploaded to 0G.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Buttons */}
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => {
+                      setShowWinnerReveal(false);
+                      initGame();
+                    }}
+                    className="flex-1 py-2.5 rounded-lg bg-gradient-to-r from-[#b89255] to-[#8a6a30] text-black font-semibold text-xs text-center border border-white/10 shadow-lg shadow-[#b89255]/20 active:scale-[0.98] transition-all"
+                  >
+                    Start New Match
+                  </button>
+                  <button
+                    onClick={() => setShowWinnerReveal(false)}
+                    className="px-4 py-2.5 rounded-lg bg-[#111827] border border-white/5 hover:border-white/10 text-xs font-mono font-semibold"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
-

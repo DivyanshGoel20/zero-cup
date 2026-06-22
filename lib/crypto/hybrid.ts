@@ -143,7 +143,7 @@ export async function decryptPayload<T = object>(
   const rawAesKey = await crypto.subtle.decrypt(
     { name: "RSA-OAEP" },
     rsaPrivateKey,
-    fromBase64(bundle.encryptedKey)
+    fromBase64(bundle.encryptedKey) as any
   );
 
   // 3. Import the AES key
@@ -157,9 +157,9 @@ export async function decryptPayload<T = object>(
 
   // 4. Decrypt the ciphertext
   const plaintextBuf = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: fromBase64(bundle.iv) },
+    { name: "AES-GCM", iv: fromBase64(bundle.iv) as any },
     aesKey,
-    fromBase64(bundle.ciphertext)
+    fromBase64(bundle.ciphertext) as any
   );
 
   const decoder = new TextDecoder();
