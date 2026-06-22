@@ -6,16 +6,19 @@ import { DETECTIVE_BY_ID } from "@/lib/game/constants";
 import { useEffect, useRef } from "react";
 
 const ACTION_STYLES: Record<string, { label: string; color: string }> = {
-  GAME_START:    { label: "START",    color: "#10b981" },
-  ROLL:          { label: "ROLL",     color: "#b89255" },
-  ENTER_ROOM:    { label: "ENTER",    color: "#06b6d4" },
-  SUGGEST:       { label: "SUGGEST",  color: "#8b5cf6" },
-  DISPROVE:      { label: "DISPROVE", color: "#f59e0b" },
-  NO_DISPROVAL:  { label: "OPEN!",    color: "#f43f5e" },
-  ACCUSE:        { label: "ACCUSE",   color: "#ef4444" },
-  ELIMINATED:    { label: "OUT",      color: "#475569" },
-  TURN_START:    { label: "TURN",     color: "#64748b" },
-  GAME_OVER:     { label: "OVER",     color: "#10b981" },
+  GAME_START:     { label: "START",    color: "#10b981" },
+  ROLL:           { label: "ROLL",     color: "#b89255" },
+  ENTER_ROOM:     { label: "ENTER",    color: "#06b6d4" },
+  SUGGEST:        { label: "SUGGEST",  color: "#8b5cf6" },
+  DISPROVE:       { label: "DISPROVE", color: "#f59e0b" },
+  NO_DISPROVAL:   { label: "OPEN!",    color: "#f43f5e" },
+  ACCUSE:         { label: "ACCUSE",   color: "#ef4444" },
+  ELIMINATED:     { label: "OUT",      color: "#475569" },
+  TURN_START:     { label: "TURN",     color: "#64748b" },
+  GAME_OVER:      { label: "OVER",     color: "#10b981" },
+  THINK:          { label: "THINK",    color: "#a78bfa" },
+  STORAGE_UPLOAD: { label: "STORAGE",  color: "#06b6d4" },
+  CHAIN_CONFIRM:  { label: "CHAIN",    color: "#10b981" },
 };
 
 interface ActivityFeedProps {

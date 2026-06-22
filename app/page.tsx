@@ -36,6 +36,9 @@ export default function Home() {
     makeSuggestion,
     makeAccusation,
     advanceTurn,
+    fetchAIMonologue,
+    isThinking,
+    activeMonologue,
   } = useGameStore();
 
   const {
@@ -47,6 +50,10 @@ export default function Home() {
     showWinnerReveal,
     setShowWinnerReveal,
   } = useUIStore();
+
+  // Helper for current active detective
+  const activeDetectiveId = detectiveOrder[currentDetectiveIndex];
+  const activeDetective = detectives.find((d) => d.id === activeDetectiveId);
 
   const [loadingKeys, setLoadingKeys] = useState(false);
 
@@ -177,16 +184,29 @@ export default function Home() {
     setDiceAnimating,
   ]);
 
-  // 4. Trigger modal reveal when game finishes
+  // 4. Trigger monologue fetch when state transitions to idle (roll) or suggesting (investigate)
+  useEffect(() => {
+    if (status !== "playing" || !activeDetective) return;
+
+    const activeId = activeDetective.id;
+    const roundVal = useGameStore.getState().round;
+    const turnVal = useGameStore.getState().turn;
+
+    if (actionState === "idle") {
+      const context = `Location: Hallway (${activeDetective.position.x}, ${activeDetective.position.y}), Round: ${roundVal}, Turn: ${turnVal}`;
+      fetchAIMonologue(activeId, context, "ROLL_DICE");
+    } else if (actionState === "suggesting" && activeDetective.currentRoom) {
+      const context = `Location: ${activeDetective.currentRoom}, Notebook solved progress: ${Math.round((confidence[activeId] || 0) * 100)}%`;
+      fetchAIMonologue(activeId, context, "MAKE_SUGGESTION");
+    }
+  }, [status, actionState, activeDetectiveId]);
+
+  // 5. Trigger modal reveal when game finishes
   useEffect(() => {
     if (status === "finished" && winner) {
       setShowWinnerReveal(true);
     }
   }, [status, winner, setShowWinnerReveal]);
-
-  // Helper for current active detective
-  const activeDetectiveId = detectiveOrder[currentDetectiveIndex];
-  const activeDetective = detectives.find((d) => d.id === activeDetectiveId);
 
   // Status message text
   const getStatusMessage = () => {
@@ -196,6 +216,14 @@ export default function Home() {
         : "All detectives eliminated. Ashford Manor remains a mystery.";
     }
     if (!activeDetective) return "Initializing board...";
+
+    if (isThinking) {
+      return `🧠 ${activeDetective.name} is reasoning (0G Compute)...`;
+    }
+
+    if (activeMonologue) {
+      return `💬 ${activeDetective.name}: "${activeMonologue}"`;
+    }
 
     switch (actionState) {
       case "idle":

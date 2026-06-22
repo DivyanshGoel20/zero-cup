@@ -74,6 +74,10 @@ export interface GameState {
 
   // Winner
   winner: DetectiveId | null;
+
+  // AI monologue
+  activeMonologue: string | null;
+  isThinking: boolean;
 }
 
 export interface GameActions {
@@ -84,6 +88,7 @@ export interface GameActions {
   makeAccusation: (accusation: Suggestion) => void;
   advanceTurn: () => void;
   addLog: (agentId: DetectiveId | "SYSTEM", action: string, details: string) => void;
+  fetchAIMonologue: (agentId: DetectiveId, context: string, action: string) => Promise<void>;
 }
 
 // ============================================================
@@ -119,6 +124,8 @@ const INITIAL_STATE: GameState = {
   pendingSuggestion: null,
   log: [],
   winner: null,
+  activeMonologue: null,
+  isThinking: false,
 };
 
 // ============================================================
@@ -177,6 +184,27 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
       confidence,
       log: [initLog],
     });
+
+    // Background upload of game setup to 0G Storage
+    fetch("/api/storage/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: `setup-${gameId}`,
+        data: { envelope, hands },
+      }),
+    })
+      .then((res) => res.json())
+      .then((resData) => {
+        if (resData.ok && resData.rootHash) {
+          get().addLog(
+            "SYSTEM",
+            "STORAGE_UPLOAD",
+            `Dealt hands and secret envelope encrypted and stored in 0G Storage. Root hash: ${resData.rootHash}`
+          );
+        }
+      })
+      .catch((err) => console.error("Initial storage upload failed", err));
   },
 
   // ── Dice ─────────────────────────────────────────────────
@@ -215,6 +243,28 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
     });
 
     get().addLog(activeId, "ROLL", `Rolled a ${roll}. Moving ${clampedPath.length - 1} step(s).`);
+
+    const { gameId, round, turn } = get();
+    // Anchor dice roll to 0G Chain
+    fetch("/api/chain/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "DICE_ROLL",
+        data: { gameId, round, turn, detective: activeId, roll },
+      }),
+    })
+      .then((res) => res.json())
+      .then((resData) => {
+        if (resData.ok && resData.txHash) {
+          get().addLog(
+            "SYSTEM",
+            "CHAIN_CONFIRM",
+            `Dice roll by ${activeId} anchored on 0G Chain. Tx: ${resData.txHash.substring(0, 18)}...`
+          );
+        }
+      })
+      .catch((err) => console.error("Chain record failed for dice roll", err));
   },
 
   // ── Step movement (called per animation frame / tick) ────
@@ -303,6 +353,49 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
       pendingSuggestion: suggestion,
       actionState: solution ? "accusing" : "next_turn_pending",
     });
+
+    const { gameId, round, turn } = get();
+    // Anchor suggestion to 0G Chain
+    fetch("/api/chain/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "SUGGESTION",
+        data: { gameId, round, turn, detective: activeId, suggestion },
+      }),
+    })
+      .then((res) => res.json())
+      .then((resData) => {
+        if (resData.ok && resData.txHash) {
+          get().addLog(
+            "SYSTEM",
+            "CHAIN_CONFIRM",
+            `Suggestion anchored on 0G Chain. Tx: ${resData.txHash.substring(0, 18)}...`
+          );
+        }
+      })
+      .catch((err) => console.error("Chain record failed for suggestion", err));
+
+    // Upload encrypted suggestion and result to 0G Storage
+    fetch("/api/storage/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        key: `suggest-${gameId}-${turn}`,
+        data: { suggestion, result: result ? { disprover: result.disproverId } : "NO_DISPROVAL" },
+      }),
+    })
+      .then((res) => res.json())
+      .then((resData) => {
+        if (resData.ok && resData.rootHash) {
+          get().addLog(
+            "SYSTEM",
+            "STORAGE_UPLOAD",
+            `Suggestion notebook data encrypted and stored in 0G Storage. Root: ${resData.rootHash.substring(0, 16)}...`
+          );
+        }
+      })
+      .catch((err) => console.error("Storage upload failed for suggestion", err));
   },
 
   // ── Accusation ───────────────────────────────────────────
@@ -341,6 +434,28 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         set({ detectives: updatedDetectives, actionState: "next_turn_pending" });
       }
     }
+
+    const { gameId, round, turn } = get();
+    // Anchor accusation to 0G Chain
+    fetch("/api/chain/record", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "ACCUSATION",
+        data: { gameId, round, turn, detective: activeId, accusation, correct },
+      }),
+    })
+      .then((res) => res.json())
+      .then((resData) => {
+        if (resData.ok && resData.txHash) {
+          get().addLog(
+            "SYSTEM",
+            "CHAIN_CONFIRM",
+            `Accusation anchored on 0G Chain. Tx: ${resData.txHash.substring(0, 18)}...`
+          );
+        }
+      })
+      .catch((err) => console.error("Chain record failed for accusation", err));
   },
 
   // ── Advance turn ─────────────────────────────────────────
@@ -391,5 +506,31 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
       isEncrypted: false,
     };
     set((s) => ({ log: [...s.log, entry] }));
+  },
+
+  // ── AI Thought Monologues (0G Compute) ───────────────────
+  fetchAIMonologue: async (agentId, context, action) => {
+    set({ isThinking: true, activeMonologue: null });
+    try {
+      const res = await fetch("/api/inference", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentId, context, action }),
+      });
+      const data = await res.json();
+      if (data.ok && data.answer) {
+        set({ activeMonologue: data.answer, isThinking: false });
+        get().addLog(
+          agentId,
+          "THINK",
+          data.answer
+        );
+      } else {
+        set({ isThinking: false });
+      }
+    } catch (err) {
+      console.warn("[0G Compute] API call failed, thinking skipped:", err);
+      set({ isThinking: false });
+    }
   },
 }));
