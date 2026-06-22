@@ -6,25 +6,29 @@ export async function POST(request: Request) {
   try {
     const { action, data } = await request.json();
 
-    const privateKey = (process.env.NEXT_PUBLIC_DEFAULT_PRIVATE_KEY || "").trim();
-    
-    // Fallback transaction hash generator
-    const generateMockTxHash = () => 
-      "0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+    const privateKey = (process.env.DEFAULT_PRIVATE_KEY || process.env.NEXT_PUBLIC_DEFAULT_PRIVATE_KEY || "").trim();
 
     if (!privateKey) {
-      console.warn("[0G Chain] NEXT_PUBLIC_DEFAULT_PRIVATE_KEY not found. Using simulated tx hash.");
-      return NextResponse.json({
-        ok: true,
-        txHash: generateMockTxHash(),
-        simulated: true
-      });
+      return NextResponse.json(
+        { ok: false, error: "DEFAULT_PRIVATE_KEY is not configured in your .env file. Real 0G Chain records require a private key." },
+        { status: 400 }
+      );
     }
-
-    console.log(`[0G Chain] Anchoring action ${action} to 0G Galileo Testnet...`);
 
     const provider = new ethers.JsonRpcProvider(ZG_CONFIG.rpcUrl);
     const signer = new ethers.Wallet(privateKey, provider);
+    const address = signer.address;
+
+    // Check balance first
+    const balance = await provider.getBalance(address);
+    if (balance === 0n) {
+      return NextResponse.json(
+        { ok: false, error: `Address ${address} has 0 gas on 0G Galileo Testnet. Please fund it at faucet.0g.ai` },
+        { status: 400 }
+      );
+    }
+
+    console.log(`[0G Chain] Anchoring action ${action} to 0G Galileo Testnet...`);
 
     // Encode payload as transaction calldata
     const payloadStr = JSON.stringify({ action, data, timestamp: Date.now() });
@@ -50,12 +54,13 @@ export async function POST(request: Request) {
 
   } catch (error: any) {
     console.error("[0G Chain] Handler exception:", error);
-    const mockHash = "0x" + Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
-    return NextResponse.json({
-      ok: true,
-      txHash: mockHash,
-      error: error?.message || String(error),
-      simulated: true
-    });
+    let msg = error?.message || String(error);
+    if (msg.includes("insufficient funds") || msg.includes("INSUFFICIENT_FUNDS")) {
+      msg = `Insufficient funds/gas for transaction. Please fund your key at faucet.0g.ai`;
+    }
+    return NextResponse.json(
+      { ok: false, error: `0G Chain error: ${msg}` },
+      { status: 500 }
+    );
   }
 }

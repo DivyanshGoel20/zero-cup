@@ -17,9 +17,9 @@ export const ZG_CONFIG = {
 export const COMPUTE_CONFIG = {
   baseUrl:
     process.env.ZERO_G_ROUTER_BASE_URL ??
-    "https://router-api-testnet.integratenetwork.work/v1",
+    "https://compute-network-6.integratenetwork.work/v1/proxy",
   model:
-    process.env.ZERO_G_ROUTER_MODEL ?? "qwen/qwen-2.5-7b-instruct",
+    process.env.ZERO_G_ROUTER_MODEL ?? "qwen/qwen2.5-omni-7b",
 } as const;
 
 /** Unique project attribute that tags all 0G Storage uploads for this app. */

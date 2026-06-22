@@ -80,6 +80,32 @@ export function ActivityFeed({ log }: ActivityFeedProps) {
                     </div>
                   )}
                   <p className="text-[10px] text-[#94a3b8] leading-snug">{entry.details}</p>
+                  
+                  {/* Explorer links */}
+                  {(entry.txHash || entry.rootHash) && (
+                    <div className="flex flex-wrap gap-x-3 gap-y-1 mt-1.5 pt-1 border-t border-white/[0.03] text-[9px] font-mono text-[#64748b]">
+                      {entry.txHash && (
+                        <a
+                          href={`https://chainscan-galileo.0g.ai/tx/${entry.txHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="hover:text-[#b89255] transition-colors underline flex items-center gap-0.5"
+                        >
+                          🔗 Chain Tx: {entry.txHash.substring(0, 10)}...
+                        </a>
+                      )}
+                      {entry.rootHash && (
+                        <a
+                          href={`https://storagescan-galileo.0g.ai/tx/${entry.txHash || entry.rootHash}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="hover:text-[#06b6d4] transition-colors underline flex items-center gap-0.5"
+                        >
+                          📦 Storage: {entry.rootHash.substring(0, 10)}...
+                        </a>
+                      )}
+                    </div>
+                  )}
                 </div>
               </motion.div>
             );

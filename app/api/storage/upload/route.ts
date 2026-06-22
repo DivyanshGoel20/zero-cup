@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { Indexer, MemData } from "@0glabs/0g-ts-sdk";
+import { Indexer, MemData } from "@0gfoundation/0g-storage-ts-sdk";
 import { ethers } from "ethers";
 import { ZG_CONFIG } from "@/lib/zeroG/config";
 
@@ -7,26 +7,29 @@ export async function POST(request: Request) {
   try {
     const { key, data } = await request.json();
 
-    const privateKey = (process.env.NEXT_PUBLIC_DEFAULT_PRIVATE_KEY || "").trim();
-    
-    // Fallback root hash if private key or node connection fails
-    const generateMockRootHash = () => 
-      Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
+    const privateKey = (process.env.DEFAULT_PRIVATE_KEY || process.env.NEXT_PUBLIC_DEFAULT_PRIVATE_KEY || "").trim();
 
     if (!privateKey) {
-      console.warn("[0G Storage] NEXT_PUBLIC_DEFAULT_PRIVATE_KEY not found. Using fallback mock root hash.");
-      return NextResponse.json({
-        ok: true,
-        rootHash: generateMockRootHash(),
-        txHash: "0x" + generateMockRootHash(),
-        simulated: true
-      });
+      return NextResponse.json(
+        { ok: false, error: "DEFAULT_PRIVATE_KEY is not configured in your .env file. Real 0G Storage uploads require a private key." },
+        { status: 400 }
+      );
     }
 
-    // Connect to 0G Galileo RPC and Storage Indexer
     const provider = new ethers.JsonRpcProvider(ZG_CONFIG.rpcUrl);
     const signer = new ethers.Wallet(privateKey, provider);
     const indexer = new Indexer(ZG_CONFIG.storageIndexer);
+
+    const address = signer.address;
+
+    // Check balance first to provide clear gas error messages
+    const balance = await provider.getBalance(address);
+    if (balance === 0n) {
+      return NextResponse.json(
+        { ok: false, error: `Address ${address} has 0 gas on 0G Galileo Testnet. Please fund it at faucet.0g.ai` },
+        { status: 400 }
+      );
+    }
 
     // Encode text as byte array for MemData
     const dataStr = JSON.stringify({ key, data, timestamp: Date.now() });
@@ -40,34 +43,53 @@ export async function POST(request: Request) {
 
     if (err) {
       console.error("[0G Storage] Upload error from SDK:", err);
-      // Fallback on connection or indexer failures
-      return NextResponse.json({
-        ok: true,
-        rootHash: generateMockRootHash(),
-        txHash: "0x" + generateMockRootHash(),
-        error: err.message || String(err),
-        simulated: true
-      });
+      let errMsg = err.message || String(err);
+      if (errMsg.includes("insufficient funds") || errMsg.includes("INSUFFICIENT_FUNDS")) {
+        errMsg = `Insufficient funds for storage fee/gas for address ${address}. Fund it at faucet.0g.ai`;
+      } else if (errMsg.includes("REPLACEMENT_UNDERPRICED") || errMsg.includes("replacement fee too low") || errMsg.includes("replacement transaction underpriced")) {
+        errMsg = `A prior transaction from ${address} is still pending in the mempool. Please wait a few seconds and retry.`;
+      }
+      return NextResponse.json(
+        { ok: false, error: `0G Storage SDK error: ${errMsg}` },
+        { status: 500 }
+      );
     }
 
-    console.log("[0G Storage] Upload completed successfully. Root hash:", res.rootHash);
+    if (!res) {
+      return NextResponse.json(
+        { ok: false, error: "0G Storage upload returned an empty result." },
+        { status: 500 }
+      );
+    }
+
+    let rootHash = "";
+    let txHash = "";
+
+    if ("rootHash" in res) {
+      rootHash = res.rootHash;
+      txHash = res.txHash;
+    } else {
+      rootHash = res.rootHashes[0];
+      txHash = res.txHashes[0];
+    }
+
+    console.log("[0G Storage] Upload completed successfully. Root hash:", rootHash);
     return NextResponse.json({
       ok: true,
-      rootHash: res.rootHash,
-      txHash: res.txHash,
+      rootHash,
+      txHash,
       simulated: false
     });
 
   } catch (error: any) {
     console.error("[0G Storage] Handler exception:", error);
-    // Secure fallback to ensure gameplay simulation runs smoothly
-    const mockHash = Array.from({ length: 64 }, () => Math.floor(Math.random() * 16).toString(16)).join("");
-    return NextResponse.json({
-      ok: true,
-      rootHash: mockHash,
-      txHash: "0x" + mockHash,
-      error: error?.message || String(error),
-      simulated: true
-    });
+    let msg = error?.message || String(error);
+    if (msg.includes("insufficient funds") || msg.includes("INSUFFICIENT_FUNDS")) {
+      msg = `Insufficient funds for transaction gas. Fund your key at faucet.0g.ai`;
+    }
+    return NextResponse.json(
+      { ok: false, error: `0G Storage exception: ${msg}` },
+      { status: 500 }
+    );
   }
 }

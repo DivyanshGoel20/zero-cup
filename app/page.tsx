@@ -39,6 +39,10 @@ export default function Home() {
     fetchAIMonologue,
     isThinking,
     activeMonologue,
+    isSyncing,
+    syncMessage,
+    error,
+    derivedAddress,
   } = useGameStore();
 
   const {
@@ -55,43 +59,12 @@ export default function Home() {
   const activeDetectiveId = detectiveOrder[currentDetectiveIndex];
   const activeDetective = detectives.find((d) => d.id === activeDetectiveId);
 
-  const [loadingKeys, setLoadingKeys] = useState(false);
-
-  // 1. Automatically initialize game if initializing
-  useEffect(() => {
-    if (status === "initializing") {
-      initGame();
-    }
-  }, [status, initGame]);
-
-  // 2. Generate RSA Keypairs for all agents using Phase 1 crypto
-  useEffect(() => {
-    if (status === "playing" && detectives.length > 0 && detectives.some((d) => !d.publicKey) && !loadingKeys) {
-      const initKeys = async () => {
-        setLoadingKeys(true);
-        const { generateKeyPair } = await import("@/lib/crypto/hybrid");
-        const updated = await Promise.all(
-          detectives.map(async (d) => {
-            if (d.publicKey) return d;
-            try {
-              const keys = await generateKeyPair();
-              return { ...d, publicKey: keys.publicKey };
-            } catch (err) {
-              console.error("Failed to generate keys for " + d.id, err);
-              return { ...d, publicKey: "0g:mock_key_pair_" + d.id.toLowerCase() };
-            }
-          })
-        );
-        useGameStore.setState({ detectives: updated });
-        setLoadingKeys(false);
-      };
-      initKeys();
-    }
-  }, [status, detectives, loadingKeys]);
+  // Note: key pairs are generated inside the store's initGame action
 
   // 3. Automatic simulation loop
   useEffect(() => {
     if (status !== "playing") return;
+    if (isSyncing || error) return; // Halt loop on syncing or integration error
 
     let timer: NodeJS.Timeout;
 
@@ -111,37 +84,9 @@ export default function Home() {
         stepMovement();
       }, msPerStep);
     } else if (actionState === "suggesting") {
-      // Step C: Choose and process suggestion
+      // Step C: Choose and process suggestion (decision choice is handled by Qwen inside makeSuggestion)
       timer = setTimeout(() => {
-        const activeId = detectiveOrder[currentDetectiveIndex];
-        const detective = detectives.find((d) => d.id === activeId)!;
-        const notebook = notebooks[activeId];
-
-        if (detective.currentRoom && notebook) {
-          // Find candidates that aren't ruled out in this agent's notebook
-          const possibleSuspects = (Object.keys(notebook.suspects) as DetectiveId[]).filter(
-            (id) => notebook.suspects[id] === "POSSIBLE"
-          );
-          const possibleWeapons = (Object.keys(notebook.weapons) as WeaponId[]).filter(
-            (id) => notebook.weapons[id] === "POSSIBLE"
-          );
-
-          const suspect = possibleSuspects[Math.floor(Math.random() * possibleSuspects.length)] || "VANCE";
-          const weapon = possibleWeapons[Math.floor(Math.random() * possibleWeapons.length)] || "PEARL_PISTOL";
-
-          makeSuggestion({
-            suspect,
-            weapon,
-            room: detective.currentRoom,
-          });
-        } else {
-          // Fallback if not in a room
-          makeSuggestion({
-            suspect: "VANCE",
-            weapon: "PEARL_PISTOL",
-            room: "GRAND_FOYER",
-          });
-        }
+        makeSuggestion();
       }, msPerStep * 4);
     } else if (actionState === "accusing") {
       // Step D: Solve and execute final accusation
@@ -182,11 +127,14 @@ export default function Home() {
     makeAccusation,
     advanceTurn,
     setDiceAnimating,
+    isSyncing,
+    error,
   ]);
 
   // 4. Trigger monologue fetch when state transitions to idle (roll) or suggesting (investigate)
   useEffect(() => {
     if (status !== "playing" || !activeDetective) return;
+    if (isSyncing || error) return; // Halt loop on syncing or integration error
 
     const activeId = activeDetective.id;
     const roundVal = useGameStore.getState().round;
@@ -199,7 +147,7 @@ export default function Home() {
       const context = `Location: ${activeDetective.currentRoom}, Notebook solved progress: ${Math.round((confidence[activeId] || 0) * 100)}%`;
       fetchAIMonologue(activeId, context, "MAKE_SUGGESTION");
     }
-  }, [status, actionState, activeDetectiveId]);
+  }, [status, actionState, activeDetectiveId, isSyncing, error]);
 
   // 5. Trigger modal reveal when game finishes
   useEffect(() => {
@@ -243,13 +191,120 @@ export default function Home() {
     }
   };
 
+  if (status === "initializing") {
+    return (
+      <div className="flex flex-col min-h-screen bg-[#080b14] text-[#f1f5f9] font-sans selection:bg-[#b89255] selection:text-black">
+        <Header />
+        <main className="flex-1 flex items-center justify-center p-6 max-w-4xl mx-auto">
+          <div className="glass-panel p-8 shadow-2xl w-full text-center space-y-8 relative overflow-hidden border border-white/5">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-[#b89255] via-[#8a6a30] to-[#b89255]" />
+            
+            {/* Logo area */}
+            <div className="space-y-3">
+              <div className="wax-seal mx-auto w-16 h-16 shadow-[0_0_20px_rgba(139,17,17,0.4)]" />
+              <h2 className="text-3xl font-extrabold tracking-tight text-[#b89255]">
+                Ashford Manor Mystery
+              </h2>
+              <p className="text-sm text-[#94a3b8] font-mono max-w-lg mx-auto">
+                A decentralized board game where five AI detective agents race to solve a murder, anchoring logs to 0G Storage & Chain.
+              </p>
+            </div>
+
+            {/* Detectives list */}
+            <div className="grid grid-cols-1 sm:grid-cols-5 gap-4 pt-4 border-t border-b border-white/5 py-6">
+              {DETECTIVES.map((det) => (
+                <div key={det.id} className="bg-white/[0.02] border border-white/5 p-3.5 rounded-xl hover:border-white/10 transition-colors">
+                  <div
+                    className="w-8 h-8 rounded-full mx-auto flex items-center justify-center font-bold text-sm shadow-inner"
+                    style={{
+                      backgroundColor: `${det.color}22`,
+                      color: det.color,
+                      border: `1px solid ${det.color}44`
+                    }}
+                  >
+                    {det.name.charAt(0)}
+                  </div>
+                  <h4 className="text-xs font-bold mt-2 truncate" style={{ color: det.color }}>
+                    {det.name}
+                  </h4>
+                  <span className="text-[9px] text-[#475569] block font-mono mt-0.5 truncate uppercase">
+                    {det.id}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            {/* Begin Case Button */}
+            <div className="pt-2">
+              <motion.button
+                whileHover={{ scale: 1.03 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={() => initGame()}
+                className="px-8 py-3.5 rounded-xl font-bold font-mono text-sm tracking-wider uppercase bg-gradient-to-r from-[#b89255] to-[#8a6a30] text-black shadow-lg shadow-[#b89255]/20 hover:shadow-[#b89255]/35 transition-all cursor-pointer active:scale-95"
+              >
+                Begin Investigation
+              </motion.button>
+              <p className="text-[10px] text-[#475569] font-mono mt-3">
+                *The game will play automatically for up to 2 rounds once started.
+              </p>
+            </div>
+          </div>
+        </main>
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col min-h-screen bg-[#080b14] text-[#f1f5f9] font-sans selection:bg-[#b89255] selection:text-black">
       {/* Header bar */}
       <Header />
 
-      {/* Main content grid */}
-      <main className="flex-1 p-4 md:p-6 lg:p-8 max-w-7xl mx-auto w-full grid grid-cols-1 lg:grid-cols-3 gap-6 items-start">
+      {/* Main content container */}
+      <main className="flex-1 p-4 md:p-6 lg:p-8 max-w-7xl mx-auto w-full flex flex-col gap-6">
+        
+        {/* Error State Warning Block */}
+        {error && (
+          <div className="bg-red-950/80 border border-red-500/40 rounded-2xl p-5 text-red-200 flex flex-col gap-3 font-mono text-sm relative shadow-2xl backdrop-blur-md">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-red-600 rounded-t-2xl" />
+            <div className="flex items-center gap-2 text-red-400 font-bold text-base animate-pulse">
+              <AlertTriangle className="w-5 h-5 shrink-0" />
+              <span>0G INTEGRATION ERROR — GAME HALTED</span>
+            </div>
+            <p className="text-red-300 font-sans leading-relaxed">{error}</p>
+            <div className="flex flex-wrap gap-x-6 gap-y-2 pt-3 border-t border-red-500/20 text-xs text-red-400/80 items-center">
+              <div>
+                Derived Address: <code className="bg-black/40 px-1.5 py-0.5 rounded text-white select-all">{derivedAddress}</code>
+              </div>
+              <div>
+                Faucet Link:{" "}
+                <a
+                  href="https://faucet.0g.ai"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline text-[#b89255] hover:text-[#e0b571] font-bold"
+                >
+                  faucet.0g.ai ↗
+                </a>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Syncing Overlay Status indicator */}
+        {isSyncing && (
+          <div className="bg-blue-950/40 border border-blue-500/20 rounded-2xl p-4 text-blue-200 flex items-center justify-between font-mono text-xs relative shadow-md backdrop-blur-md animate-pulse">
+            <div className="flex items-center gap-3">
+              <span className="flex h-2.5 w-2.5 relative">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-blue-500"></span>
+              </span>
+              <span>{syncMessage || "Syncing with 0G Network..."}</span>
+            </div>
+            <span className="text-[10px] text-blue-400/60 shrink-0">BLOCKING NEXT STEP</span>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start w-full">
         
         {/* Left Column: Board (Span 2) */}
         <section className="lg:col-span-2 flex flex-col gap-6">
@@ -362,6 +417,7 @@ export default function Home() {
             </div>
           </div>
         </section>
+        </div>
       </main>
 
       {/* Winner Reveal Modal Overlay */}
