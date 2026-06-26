@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { useGameStore } from "@/lib/store/gameStore";
 import { useUIStore, type ActivePanel } from "@/lib/store/uiStore";
 import { Header } from "./components/ui/Header";
@@ -9,11 +9,36 @@ import { DiceDisplay } from "./components/ui/DiceDisplay";
 import { ActivityFeed } from "./components/spectator/ActivityFeed";
 import { SuspicionMeter } from "./components/spectator/SuspicionMeter";
 import { DetectiveCard } from "./components/spectator/DetectiveCard";
-import { DETECTIVES, DETECTIVE_BY_ID } from "@/lib/game/constants";
-import type { DetectiveId, WeaponId } from "@/lib/game/types";
+import { DETECTIVES, DETECTIVE_BY_ID, WEAPONS, ROOMS } from "@/lib/game/constants";
+import type { DetectiveId, WeaponId, RoomId, Position, Card } from "@/lib/game/types";
 import { runDeductionAnalysis } from "@/lib/game/deduction";
+import { getReachableCells } from "@/lib/game/board";
 import { motion, AnimatePresence } from "framer-motion";
 import { Trophy, Activity, Users, HelpCircle, AlertTriangle } from "lucide-react";
+
+const getCardDetails = (id: string) => {
+  const cleanId = id.toUpperCase();
+  if (
+    cleanId.includes("VANCE") ||
+    cleanId.includes("ROSEWOOD") ||
+    cleanId.includes("BLACKWOOD") ||
+    cleanId.includes("STERLING") ||
+    cleanId.includes("ASHCROFT")
+  ) {
+    return { type: "SUSPECT", icon: "👤", color: "text-[#a78bfa] border-[#a78bfa]/20" };
+  }
+  if (
+    cleanId.includes("PISTOL") ||
+    cleanId.includes("OPENER") ||
+    cleanId.includes("STRYCHNINE") ||
+    cleanId.includes("CLOCK") ||
+    cleanId.includes("TIE") ||
+    cleanId.includes("CANE")
+  ) {
+    return { type: "WEAPON", icon: "🗡️", color: "text-[#f59e0b] border-[#f59e0b]/20" };
+  }
+  return { type: "ROOM", icon: "🚪", color: "text-[#06b6d4] border-[#06b6d4]/20" };
+};
 
 export default function Home() {
   const {
@@ -43,6 +68,11 @@ export default function Home() {
     syncMessage,
     error,
     derivedAddress,
+    humanDetectiveId,
+    disprovalPending,
+    moveHumanAction,
+    makeHumanSuggestion,
+    resolveHumanDisproval,
   } = useGameStore();
 
   const {
@@ -57,16 +87,44 @@ export default function Home() {
     setPaused,
   } = useUIStore();
 
+  // Local state for single-player interactions
+  const [selectedRole, setSelectedRole] = useState<DetectiveId | "spectator">("spectator");
+  const [suggestionSuspect, setSuggestionSuspect] = useState<DetectiveId>("VANCE");
+  const [suggestionWeapon, setSuggestionWeapon] = useState<WeaponId>("PEARL_PISTOL");
+  const [showAccusationModal, setShowAccusationModal] = useState(false);
+  const [accusationSuspect, setAccusationSuspect] = useState<DetectiveId>("VANCE");
+  const [accusationWeapon, setAccusationWeapon] = useState<WeaponId>("PEARL_PISTOL");
+  const [accusationRoom, setAccusationRoom] = useState<RoomId>("GRAND_FOYER");
+
   // Helper for current active detective
   const activeDetectiveId = detectiveOrder[currentDetectiveIndex];
   const activeDetective = detectives.find((d) => d.id === activeDetectiveId);
+
+  const isHumanTurn = activeDetectiveId === humanDetectiveId;
+  const isHumanMoving = isHumanTurn && actionState === "moving" && movementPath.length === 0;
+
+  const reachableCells = useMemo(() => {
+    if (isHumanMoving && activeDetective && diceRoll !== null) {
+      return getReachableCells(activeDetective.position, diceRoll);
+    }
+    return [];
+  }, [isHumanMoving, activeDetective, diceRoll]);
 
   // Note: key pairs are generated inside the store's initGame action
 
   // 3. Automatic simulation loop
   useEffect(() => {
     if (status !== "playing") return;
-    if (isSyncing || error || isPaused) return; // Halt loop on syncing, integration error, or if paused
+    if (isSyncing || error || isPaused || disprovalPending) return; // Halt loop on syncing, integration error, paused, or human disproval
+
+    // If active detective is human, block automatic simulation actions
+    if (activeDetectiveId === humanDetectiveId) {
+      if (actionState === "moving" && movementPath.length > 0) {
+        // Let step animation complete
+      } else {
+        return;
+      }
+    }
 
     let timer: NodeJS.Timeout;
 
@@ -132,27 +190,13 @@ export default function Home() {
     isSyncing,
     error,
     isPaused,
+    humanDetectiveId,
+    activeDetectiveId,
+    movementPath.length,
+    disprovalPending,
   ]);
 
-  // 4. Trigger monologue fetch when state transitions to idle (roll) or suggesting (investigate)
-  useEffect(() => {
-    if (status !== "playing" || !activeDetective) return;
-    if (isSyncing || error) return; // Halt loop on syncing or integration error
-
-    const activeId = activeDetective.id;
-    const roundVal = useGameStore.getState().round;
-    const turnVal = useGameStore.getState().turn;
-
-    if (actionState === "idle") {
-      const context = `Location: Hallway (${activeDetective.position.x}, ${activeDetective.position.y}), Round: ${roundVal}, Turn: ${turnVal}`;
-      fetchAIMonologue(activeId, context, "ROLL_DICE");
-    } else if (actionState === "suggesting" && activeDetective.currentRoom) {
-      const context = `Location: ${activeDetective.currentRoom}, Notebook solved progress: ${Math.round((confidence[activeId] || 0) * 100)}%`;
-      fetchAIMonologue(activeId, context, "MAKE_SUGGESTION");
-    }
-  }, [status, actionState, activeDetectiveId, isSyncing, error]);
-
-  // 5. Trigger modal reveal when game finishes
+  // 4. Trigger modal reveal when game finishes
   useEffect(() => {
     if (status === "finished" && winner) {
       setShowWinnerReveal(true);
@@ -217,28 +261,69 @@ export default function Home() {
               </p>
             </div>
 
-            {/* Detectives list */}
-            <div className="grid grid-cols-1 sm:grid-cols-5 gap-4 pt-4 border-t border-b border-white/5 py-6">
-              {DETECTIVES.map((det) => (
-                <div key={det.id} className="bg-white/[0.02] border border-white/5 p-4 rounded-xl hover:border-white/10 transition-all duration-300 shadow-md">
-                  <div
-                    className="w-10 h-10 rounded-full mx-auto flex items-center justify-center font-black text-base shadow-lg transition-transform hover:scale-110 cursor-default"
-                    style={{
-                      background: `radial-gradient(circle at 35% 35%, ${det.color} 0%, rgba(10,5,5,0.85) 100%)`,
-                      color: "#fff",
-                      border: `1px solid rgba(255,255,255,0.4)`
-                    }}
-                  >
-                    {det.name.charAt(0)}
+            {/* Choose Role Section */}
+            <div className="space-y-4 pt-4 border-t border-white/5 text-center">
+              <h3 className="text-xs font-mono font-bold text-[#b89255] uppercase tracking-wider">
+                Select Your Role
+              </h3>
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 max-w-3xl mx-auto">
+                {/* Spectator card */}
+                <div
+                  onClick={() => setSelectedRole("spectator")}
+                  className={`cursor-pointer glass-panel p-3 rounded-xl border transition-all duration-300 text-left flex flex-col justify-between h-28 relative ${
+                    selectedRole === "spectator"
+                      ? "border-[#b89255] bg-[#b89255]/5 shadow-[0_0_15px_rgba(184,146,85,0.2)]"
+                      : "border-white/5 hover:border-white/10 bg-white/[0.01]"
+                  }`}
+                >
+                  <div className="flex justify-between items-start">
+                    <span className="text-[11px] font-mono font-bold text-white uppercase tracking-wide">
+                      Spectator
+                    </span>
+                    {selectedRole === "spectator" && (
+                      <span className="text-[8px] bg-[#b89255]/20 text-[#b89255] px-1 py-0.5 rounded font-mono uppercase font-bold border border-[#b89255]/30">
+                        Selected
+                      </span>
+                    )}
                   </div>
-                  <h4 className="text-xs font-bold mt-3 truncate" style={{ color: det.color }}>
-                    {det.name}
-                  </h4>
-                  <span className="text-[9px] text-[#64748b] block font-mono mt-0.5 truncate uppercase">
-                    {det.id}
-                  </span>
+                  <p className="text-[9px] text-[#94a3b8] leading-relaxed">
+                    Watch all 5 AI detectives solve the murder case automatically.
+                  </p>
                 </div>
-              ))}
+
+                {/* Detective cards */}
+                {DETECTIVES.map((det) => (
+                  <div
+                    key={det.id}
+                    onClick={() => setSelectedRole(det.id)}
+                    className={`cursor-pointer glass-panel p-3 rounded-xl border transition-all duration-300 text-left flex flex-col justify-between h-28 relative ${
+                      selectedRole === det.id
+                        ? "border-[#b89255] bg-[#b89255]/5 shadow-[0_0_15px_rgba(184,146,85,0.2)]"
+                        : "border-white/5 hover:border-white/10 bg-white/[0.01]"
+                    }`}
+                  >
+                    <div className="flex justify-between items-start">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        <span
+                          className="w-2 h-2 rounded-full shrink-0"
+                          style={{ backgroundColor: det.color }}
+                        />
+                        <span className="text-[11px] font-bold text-white tracking-wide truncate">
+                          {det.name}
+                        </span>
+                      </div>
+                      {selectedRole === det.id && (
+                        <span className="text-[8px] bg-[#b89255]/20 text-[#b89255] px-1 py-0.5 rounded font-mono uppercase font-bold border border-[#b89255]/30">
+                          Player
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[9px] text-[#94a3b8] leading-relaxed line-clamp-2">
+                      {det.personality}
+                    </p>
+                  </div>
+                ))}
+              </div>
             </div>
 
             {/* Begin Case Button / Loading Progress Bar */}
@@ -319,13 +404,15 @@ export default function Home() {
                   <motion.button
                     whileHover={{ scale: 1.03 }}
                     whileTap={{ scale: 0.98 }}
-                    onClick={() => initGame()}
+                    onClick={() => initGame(selectedRole === "spectator" ? null : selectedRole)}
                     className="px-8 py-4 rounded-xl font-bold font-mono text-xs tracking-widest uppercase bg-gradient-to-r from-[#b89255] to-[#8a6a30] text-[#0f0a05] border border-[#d4aa6a]/40 shadow-xl shadow-black/50 hover:shadow-[#b89255]/25 transition-all cursor-pointer active:scale-95"
                   >
                     Begin Investigation
                   </motion.button>
                   <p className="text-[10px] text-[#64748b] font-mono mt-3">
-                    *The game will play automatically until the case is solved or all detectives are eliminated.
+                    {selectedRole === "spectator"
+                      ? "*The game will play automatically until the case is solved or all detectives are eliminated."
+                      : "*You will control your detective and make moves, suggest clues, and disprove cards yourself."}
                   </p>
                 </>
               )}
@@ -423,7 +510,18 @@ export default function Home() {
               <GameBoard
                 detectives={detectives}
                 activeDetectiveId={activeDetectiveId}
-                highlightedCells={actionState === "moving" ? movementPath : []}
+                highlightedCells={
+                  movementPath.length > 0
+                    ? movementPath
+                    : isHumanMoving
+                    ? reachableCells
+                    : []
+                }
+                onCellClick={(pos) => {
+                  if (isHumanMoving) {
+                    moveHumanAction(pos);
+                  }
+                }}
               />
             </div>
 
@@ -444,10 +542,180 @@ export default function Home() {
                   value={diceRoll}
                   isAnimating={isDiceAnimating}
                   onRoll={rollDiceAction}
-                  disabled={actionState !== "idle" || status !== "playing"}
+                  disabled={actionState !== "idle" || status !== "playing" || !isHumanTurn}
                 />
               </div>
             </div>
+
+            {/* Human Active Action Desk */}
+            {(isHumanTurn || (disprovalPending && disprovalPending.disproverId === humanDetectiveId)) && (
+              <div className="w-full mt-4 glass-panel p-5 border border-[#b89255]/40 shadow-[0_0_25px_rgba(184,146,85,0.1)] relative overflow-hidden text-left">
+                <div className="absolute top-0 left-0 right-0 h-0.5 bg-gradient-to-r from-transparent via-[#b89255] to-transparent animate-pulse" />
+                
+                {/* Pending Disproval Interface */}
+                {disprovalPending && disprovalPending.disproverId === humanDetectiveId ? (
+                  <div className="space-y-4">
+                    <div className="flex items-center gap-2 text-xs font-mono font-bold text-[#b89255] uppercase">
+                      <HelpCircle className="w-4 h-4 animate-bounce" />
+                      <span>🔍 Disprove Suggestion</span>
+                    </div>
+                    <p className="text-xs text-[#cbd5e1] leading-relaxed">
+                      <strong>{DETECTIVE_BY_ID[disprovalPending.suggesterId]?.name}</strong> suggested that the murder was committed by{" "}
+                      <strong>{DETECTIVE_BY_ID[disprovalPending.suggestion.suspect]?.name}</strong> with the{" "}
+                      <strong>{disprovalPending.suggestion.weapon.replace(/_/g, " ")}</strong> in the{" "}
+                      <strong>{disprovalPending.suggestion.room.replace(/_/g, " ")}</strong>.
+                      <br />
+                      <span className="text-[#94a3b8]">Select one of your matching clue cards to show them (encrypted):</span>
+                    </p>
+                    
+                    <div className="flex flex-wrap gap-3 pt-2">
+                      {disprovalPending.candidates.map((card) => {
+                        const details = getCardDetails(card.id);
+                        return (
+                          <button
+                            key={card.id}
+                            disabled={isSyncing}
+                            onClick={() => resolveHumanDisproval(card)}
+                            className="bg-[#0f172a] hover:bg-[#1e293b] border border-white/5 hover:border-[#b89255] rounded-xl p-3 text-left w-28 h-36 flex flex-col justify-between cursor-pointer transition-all hover:scale-105 active:scale-95 disabled:opacity-50 disabled:pointer-events-none"
+                          >
+                            <div className="flex justify-between items-center w-full">
+                              <span className="text-[7px] font-mono text-gray-400 font-bold uppercase">{details.type}</span>
+                              <span className="text-[10px]">{details.icon}</span>
+                            </div>
+                            <div className="text-[16px] text-center w-full my-1">
+                              {details.icon === "👤" ? "🕵️" : details.icon === "🗡️" ? "⚔️" : "🏛️"}
+                            </div>
+                            <div className="text-[8px] font-mono font-black text-white uppercase text-center tracking-wider leading-tight line-clamp-2 pt-1 border-t border-white/5">
+                              {card.name.replace(/_/g, " ")}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  // Human Active Turn Interface
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-xs font-mono font-bold text-[#b89255] uppercase">
+                        <Users className="w-4 h-4" />
+                        <span>Your Turn: {activeDetective?.name}</span>
+                      </div>
+                      
+                      {/* Accusation Button */}
+                      <button
+                        onClick={() => {
+                          setAccusationRoom(activeDetective?.currentRoom || "GRAND_FOYER");
+                          setShowAccusationModal(true);
+                        }}
+                        className="px-3 py-1 bg-red-950/45 hover:bg-red-900/45 text-red-400 border border-red-900/40 rounded-lg text-[9px] font-bold font-mono tracking-wider uppercase transition-all hover:border-red-500/50 cursor-pointer active:scale-95"
+                      >
+                        🚨 Accuse
+                      </button>
+                    </div>
+
+                    {/* Step-specific controls */}
+                    {actionState === "idle" && (
+                      <div className="space-y-2">
+                        <p className="text-xs text-[#cbd5e1] leading-relaxed">
+                          Your turn has started. Click the dice roll button in the panel below to roll and calculate your path possibilities.
+                        </p>
+                      </div>
+                    )}
+
+                    {actionState === "moving" && movementPath.length === 0 && (
+                      <div className="space-y-2">
+                        <p className="text-xs text-[#cbd5e1] leading-relaxed">
+                          You rolled a <strong className="text-[#b89255]">{diceRoll}</strong>. Select one of the highlighted cells on the board to move your character.
+                        </p>
+                        <div className="text-[10px] font-mono text-[#cbd5e1]/70 bg-black/30 p-2 rounded-lg border border-white/5">
+                          📌 Reachable cells have gold borders. Click on any of them to travel.
+                        </div>
+                      </div>
+                    )}
+
+                    {actionState === "moving" && movementPath.length > 0 && (
+                      <div className="space-y-2">
+                        <p className="text-xs text-[#cbd5e1] leading-relaxed animate-pulse">
+                          Walking hallways... ({movementStep} / {movementPath.length - 1} steps completed)
+                        </p>
+                      </div>
+                    )}
+
+                    {actionState === "suggesting" && activeDetective?.currentRoom && (
+                      <div className="space-y-4">
+                        <p className="text-xs text-[#cbd5e1] leading-relaxed">
+                          You are inside the <strong className="text-[#b89255]">{activeDetective.currentRoom.replace(/_/g, " ")}</strong>. You can make a suggestion to question other investigators.
+                        </p>
+                        
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                          {/* Suspect dropdown */}
+                          <div className="flex flex-col gap-1.5">
+                            <label className="text-[9px] font-mono font-bold text-gray-400 uppercase tracking-wider">Suspect</label>
+                            <select
+                              value={suggestionSuspect}
+                              onChange={(e) => setSuggestionSuspect(e.target.value as DetectiveId)}
+                              className="bg-[#0f172a] border border-white/10 rounded-lg p-2 text-xs font-semibold text-white focus:border-[#b89255] outline-none"
+                            >
+                              {DETECTIVES.map((d) => (
+                                <option key={d.id} value={d.id}>
+                                  {d.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          {/* Weapon dropdown */}
+                          <div className="flex flex-col gap-1.5">
+                            <label className="text-[9px] font-mono font-bold text-gray-400 uppercase tracking-wider">Weapon</label>
+                            <select
+                              value={suggestionWeapon}
+                              onChange={(e) => setSuggestionWeapon(e.target.value as WeaponId)}
+                              className="bg-[#0f172a] border border-white/10 rounded-lg p-2 text-xs font-semibold text-white focus:border-[#b89255] outline-none"
+                            >
+                              {WEAPONS.map((w) => (
+                                <option key={w.id} value={w.id}>
+                                  {w.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        <button
+                          disabled={isSyncing}
+                          onClick={() =>
+                            makeHumanSuggestion({
+                              suspect: suggestionSuspect,
+                              weapon: suggestionWeapon,
+                              room: activeDetective.currentRoom!,
+                            })
+                          }
+                          className="px-6 py-2.5 rounded-lg bg-gradient-to-r from-[#b89255] to-[#8a6a30] text-black font-bold font-mono text-[10px] tracking-wider uppercase border border-white/10 shadow-md cursor-pointer active:scale-95 disabled:opacity-50 disabled:pointer-events-none w-full text-center"
+                        >
+                          💡 Submit Suggestion
+                        </button>
+                      </div>
+                    )}
+
+                    {actionState === "next_turn_pending" && (
+                      <div className="space-y-2">
+                        <p className="text-xs text-[#cbd5e1] leading-relaxed">
+                          Your turn is complete. Click the button below to hand over the magnifying glass to the next detective.
+                        </p>
+                        <button
+                          disabled={isSyncing}
+                          onClick={() => advanceTurn()}
+                          className="px-6 py-2.5 rounded-lg bg-gradient-to-r from-[#b89255] to-[#8a6a30] text-black font-bold font-mono text-[10px] tracking-wider uppercase border border-white/10 shadow-md cursor-pointer active:scale-95 disabled:opacity-50 disabled:pointer-events-none w-full text-center"
+                        >
+                          ✓ End Turn & Pass
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </section>
 
@@ -597,9 +865,114 @@ export default function Home() {
                   </button>
                   <button
                     onClick={() => setShowWinnerReveal(false)}
-                    className="px-4 py-2.5 rounded-lg bg-[#111827] border border-white/5 hover:border-white/10 text-xs font-mono font-semibold"
+                    className="px-4 py-2.5 rounded-lg bg-[#111827] border border-white/5 hover:border-white/10 text-xs font-mono font-semibold cursor-pointer"
                   >
                     Close
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Accusation Modal Overlay */}
+      <AnimatePresence>
+        {showAccusationModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="max-w-md w-full bg-[#0d1117] border border-red-500/40 rounded-2xl shadow-[0_0_50px_rgba(239,68,68,0.25)] overflow-hidden"
+            >
+              {/* Header */}
+              <div className="bg-gradient-to-b from-red-500/20 to-transparent p-6 text-center border-b border-white/5 relative">
+                <AlertTriangle className="w-12 h-12 mx-auto text-red-500 animate-pulse" />
+                <h2 className="text-xl font-extrabold mt-4 text-red-500 serif-title uppercase tracking-widest">
+                  File Accusation
+                </h2>
+                <p className="text-xs text-red-400/80 font-mono mt-1">
+                  Solve the Enigma Case
+                </p>
+              </div>
+
+              {/* Warning box */}
+              <div className="px-6 pt-6">
+                <div className="bg-red-950/20 border border-red-500/20 rounded-xl p-3 text-red-300 font-mono text-[9px] leading-relaxed">
+                  ⚠️ <strong>CRITICAL WARNING:</strong> If your accusation is incorrect, you will be immediately eliminated from the investigation. The other AI detectives will continue without you.
+                </div>
+              </div>
+
+              {/* Inputs */}
+              <div className="p-6 space-y-4 text-left">
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[9px] font-mono font-bold text-gray-400 uppercase tracking-wider">Accuse Suspect</label>
+                  <select
+                    value={accusationSuspect}
+                    onChange={(e) => setAccusationSuspect(e.target.value as DetectiveId)}
+                    className="bg-[#0f172a] border border-white/10 rounded-lg p-2 text-xs font-semibold text-white focus:border-[#b89255] outline-none cursor-pointer"
+                  >
+                    {DETECTIVES.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[9px] font-mono font-bold text-gray-400 uppercase tracking-wider">Accuse Weapon</label>
+                  <select
+                    value={accusationWeapon}
+                    onChange={(e) => setAccusationWeapon(e.target.value as WeaponId)}
+                    className="bg-[#0f172a] border border-white/10 rounded-lg p-2 text-xs font-semibold text-white focus:border-[#b89255] outline-none cursor-pointer"
+                  >
+                    {WEAPONS.map((w) => (
+                      <option key={w.id} value={w.id}>
+                        {w.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-[9px] font-mono font-bold text-gray-400 uppercase tracking-wider">Accuse Room Location</label>
+                  <select
+                    value={accusationRoom}
+                    onChange={(e) => setAccusationRoom(e.target.value as RoomId)}
+                    className="bg-[#0f172a] border border-white/10 rounded-lg p-2 text-xs font-semibold text-white focus:border-[#b89255] outline-none cursor-pointer"
+                  >
+                    {ROOMS.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Buttons */}
+                <div className="flex gap-3 pt-2">
+                  <button
+                    disabled={isSyncing}
+                    onClick={async () => {
+                      setShowAccusationModal(false);
+                      await makeAccusation({
+                        suspect: accusationSuspect,
+                        weapon: accusationWeapon,
+                        room: accusationRoom,
+                      });
+                    }}
+                    className="flex-1 py-2.5 rounded-lg bg-gradient-to-r from-red-600 to-red-800 text-white font-bold font-mono text-[10px] tracking-wider uppercase border border-red-500/40 shadow-lg hover:shadow-red-900/30 active:scale-[0.98] transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    Submit Accusation
+                  </button>
+                  <button
+                    disabled={isSyncing}
+                    onClick={() => setShowAccusationModal(false)}
+                    className="px-4 py-2.5 rounded-lg bg-[#111827] border border-white/5 hover:border-white/10 text-[10px] font-mono font-semibold uppercase tracking-wider cursor-pointer"
+                  >
+                    Cancel
                   </button>
                 </div>
               </div>

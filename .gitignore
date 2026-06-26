@@ -91,4 +91,5 @@ ehthumbs.db
 
 folder
 project.md
+0g-agent-skills
 # lockfiles (optional, depending on preference, but usually we keep package-lock.json. We will not ignore lockfiles here unless specified).

@@ -33,6 +33,7 @@ interface BoardCellProps {
   y: number;
   cellType: CellType;
   isHighlighted: boolean;
+  onClick?: () => void;
   children?: React.ReactNode;
 }
 
@@ -50,6 +51,7 @@ export const BoardCell = memo(function BoardCell({
   y,
   cellType,
   isHighlighted,
+  onClick,
   children,
 }: BoardCellProps) {
   const roomId = getRoomForCell(x, y);
@@ -80,14 +82,18 @@ export const BoardCell = memo(function BoardCell({
       border = "border-transparent";
       break;
     case "room_center":
-      bg = "transparent";
-      border = "border-transparent";
+      bg = isHighlighted
+        ? "radial-gradient(circle, rgba(184,146,85,0.4) 0%, rgba(184,146,85,0.15) 100%)"
+        : "transparent";
+      border = isHighlighted ? "border-[#b89255]/60" : "border-transparent";
       break;
   }
 
   // Draw room background and borders (thick walls) for rooms
   if (roomId) {
-    bg = ROOM_GRADIENTS[roomId];
+    if (!isHighlighted || cellType !== "room_center") {
+      bg = ROOM_GRADIENTS[roomId];
+    }
     if (roomConfig && cellType !== "door") {
       const borderTheme = "3px solid #5a3e1a"; // Mahogany wood walls
       if (x === roomConfig.minX) borderStyle.borderLeft = borderTheme;
@@ -99,8 +105,11 @@ export const BoardCell = memo(function BoardCell({
 
   return (
     <div
-      className={`relative flex items-center justify-center border ${border} ${extraClass} transition-colors duration-150`}
-      style={{ backgroundColor: bg, cursor, ...borderStyle }}
+      onClick={isHighlighted ? onClick : undefined}
+      className={`relative flex items-center justify-center border ${border} ${extraClass} transition-colors duration-150 ${
+        isHighlighted ? "hover:brightness-125 hover:shadow-[0_0_8px_rgba(184,146,85,0.6)] cursor-pointer" : ""
+      }`}
+      style={{ backgroundColor: bg, cursor: isHighlighted ? "pointer" : cursor, ...borderStyle }}
       data-cell={`${x},${y}`}
       data-type={cellType}
     >

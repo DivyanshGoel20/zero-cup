@@ -11,12 +11,14 @@ interface GameBoardProps {
   detectives: DetectiveState[];
   activeDetectiveId: string;
   highlightedCells?: Position[];
+  onCellClick?: (pos: Position) => void;
 }
 
 export function GameBoard({
   detectives,
   activeDetectiveId,
   highlightedCells = [],
+  onCellClick,
 }: GameBoardProps) {
   // Pre-compute all cell types once (memoised — never changes at runtime)
   const cells = useMemo(() => {
@@ -102,6 +104,7 @@ export function GameBoard({
               y={y}
               cellType={type}
               isHighlighted={isHighlighted}
+              onClick={() => onCellClick?.({ x, y })}
             >
               {pawnsHere.map((det, idx) => (
                 <DetectivePawn

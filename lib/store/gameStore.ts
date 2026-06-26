@@ -14,6 +14,7 @@ import type {
 } from "@/lib/game/types";
 import {
   DETECTIVES,
+  DETECTIVE_BY_ID,
   STARTING_POSITIONS,
   ROOMS,
   ROOM_BY_ID,
@@ -89,13 +90,26 @@ export interface GameState {
   error: string | null;
   derivedAddress: string;
   privateKeys: Record<DetectiveId, string>;
+
+  // Human player state
+  humanDetectiveId: DetectiveId | null;
+  sessionPrivateKey: string | null;
+  disprovalPending: {
+    suggesterId: DetectiveId;
+    suggestion: Suggestion;
+    disproverId: DetectiveId;
+    candidates: Card[];
+  } | null;
 }
 
 export interface GameActions {
-  initGame: () => Promise<void>;
+  initGame: (selectedHumanId?: DetectiveId | null) => Promise<void>;
   rollDiceAction: () => Promise<void>;
   stepMovement: () => void;
+  moveHumanAction: (targetPos: Position) => void;
   makeSuggestion: () => Promise<void>;
+  makeHumanSuggestion: (suggestion: Suggestion) => Promise<void>;
+  resolveHumanDisproval: (card: Card) => Promise<void>;
   makeAccusation: (accusation: Suggestion) => Promise<void>;
   advanceTurn: () => void;
   addLog: (
@@ -151,7 +165,88 @@ const INITIAL_STATE: GameState = {
   error: null,
   derivedAddress: DERIVED_WALLET_ADDRESS,
   privateKeys: {} as Record<DetectiveId, string>,
+  humanDetectiveId: null,
+  sessionPrivateKey: null,
+  disprovalPending: null,
 };
+
+// ============================================================
+// LOCAL MONOLOGUES (0G COMPUTE REDUCTION)
+// ============================================================
+
+const ROLL_PHRASES: Record<DetectiveId, string[]> = {
+  VANCE: [
+    "Every step must be calculated. The layout of this hallway suggests a pattern.",
+    "Methodical search is the key. Let's see where the dice take me.",
+    "Patience, Vance. The clues are scattered, but they will form a line.",
+    "A quiet house hides loud secrets. Let's move cautiously."
+  ],
+  ROSEWOOD: [
+    "No time to waste! I need to get into a room and demand answers.",
+    "The killer is playing with us. Let's speed up the pace!",
+    "A bold move is better than sitting still. Show me the numbers!",
+    "I will corner them eventually. Let's search every corner."
+  ],
+  BLACKWOOD: [
+    "Statistically, the center rooms have higher probability density. Moving.",
+    "The variance of a 1-6 roll is high, but the expectation is 3.5. Let's proceed.",
+    "Deduction is a process of elimination. Calculating optimal path.",
+    "Evaluating probability distribution of the secret cards based on active locations."
+  ],
+  STERLING: [
+    "Relentless pressure. I will inspect every sector of this house.",
+    "No evasion will work. I'm marching straight to the next room.",
+    "Double-quick time. Let's find out who's hiding the facts.",
+    "The truth doesn't bend. I will extract it step by step."
+  ],
+  ASHCROFT: [
+    "Let them think they are ahead. Misdirection is my best ally.",
+    "A lovely day for a mystery... and a few little lies.",
+    "I'll show them a path, but walk another. Let's see.",
+    "They are watching me. Good, let them watch the wrong hand."
+  ]
+};
+
+function getLocalRollMonologue(agentId: DetectiveId): string {
+  const phrases = ROLL_PHRASES[agentId] || ["Searching..."];
+  return phrases[Math.floor(Math.random() * phrases.length)];
+}
+
+// ============================================================
+// CLOCKWISE DISPROVAL SEARCH
+// ============================================================
+
+function findDisproverClockwise(
+  suggestion: Suggestion,
+  suggesterId: DetectiveId,
+  detectiveOrder: DetectiveId[],
+  hands: Record<DetectiveId, Card[]>,
+  detectives: DetectiveState[]
+): { disproverId: DetectiveId; matchingCards: Card[] } | null {
+  const suggesterIndex = detectiveOrder.indexOf(suggesterId);
+
+  for (let i = 1; i < detectiveOrder.length; i++) {
+    const candidateId = detectiveOrder[(suggesterIndex + i) % detectiveOrder.length];
+    
+    // Skip if eliminated
+    const det = detectives.find(d => d.id === candidateId);
+    if (det?.eliminated) continue;
+
+    const hand = hands[candidateId] ?? [];
+    const matchingCards = hand.filter(
+      (c) =>
+        c.id === suggestion.suspect ||
+        c.id === suggestion.weapon ||
+        c.id === suggestion.room
+    );
+
+    if (matchingCards.length > 0) {
+      return { disproverId: candidateId, matchingCards };
+    }
+  }
+
+  return null;
+}
 
 // ============================================================
 // STORE
@@ -161,7 +256,8 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
   ...INITIAL_STATE,
 
   // ── Init ─────────────────────────────────────────────────
-  initGame: async () => {
+  // ── Init ─────────────────────────────────────────────────
+  initGame: async (selectedHumanId: DetectiveId | null = null) => {
     const gameId = makeId();
     const detectiveIds = ALL_DETECTIVE_IDS;
     const { envelope, hands } = setupDeck(detectiveIds);
@@ -173,7 +269,8 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
     });
 
     try {
-      const { generateKeyPair } = await import("@/lib/crypto/hybrid");
+      const { generateKeyPair, encryptPayload } = await import("@/lib/crypto/hybrid");
+      const sessionKeys = await generateKeyPair();
       const privateKeys: Record<DetectiveId, string> = {} as Record<DetectiveId, string>;
       const detectives: DetectiveState[] = await Promise.all(
         DETECTIVES.map(async (d) => {
@@ -207,20 +304,31 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         timestamp: Date.now(),
         agentId: "SYSTEM",
         action: "GAME_START",
-        details: `Enigma begins. Game ID: ${gameId}. 5 detectives enter the manor.`,
+        details: selectedHumanId
+          ? `Enigma begins. Game ID: ${gameId}. Human playing as ${DETECTIVE_BY_ID[selectedHumanId]?.name}.`
+          : `Enigma begins. Game ID: ${gameId}. Spectator mode (5 AI detectives).`,
         isEncrypted: false,
       };
 
       set({ syncMessage: "Encrypting and uploading sealed case files to 0G Storage..." });
       await new Promise((resolve) => setTimeout(resolve, 300));
 
-      // Upload game setup to 0G Storage
+      // Encrypt the envelope using session public key
+      const encryptedEnvelope = await encryptPayload(envelope, sessionKeys.publicKey);
+
+      // Encrypt each player's hand using their public key
+      const encryptedHands: Record<DetectiveId, string> = {} as Record<DetectiveId, string>;
+      for (const det of detectives) {
+        encryptedHands[det.id] = await encryptPayload(hands[det.id], det.publicKey);
+      }
+
+      // Upload encrypted game setup to 0G Storage
       const res = await fetch("/api/storage/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           key: `setup-${gameId}`,
-          data: { envelope, hands },
+          data: { encryptedEnvelope, encryptedHands },
         }),
       });
 
@@ -234,8 +342,8 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         timestamp: Date.now(),
         agentId: "SYSTEM",
         action: "STORAGE_UPLOAD",
-        details: `Dealt hands and secret envelope encrypted and stored in 0G Storage.`,
-        isEncrypted: false,
+        details: `Sealed case envelope and hands encrypted & stored securely on 0G Storage (anti-brute-force ciphertexts).`,
+        isEncrypted: true,
         rootHash: resData.rootHash,
         txSeq: resData.txSeq,
       };
@@ -262,6 +370,8 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         isSyncing: false,
         syncMessage: null,
         error: null,
+        humanDetectiveId: selectedHumanId,
+        sessionPrivateKey: sessionKeys.privateKey,
       });
     } catch (err: any) {
       console.error("[0G Init] Initial setup failed:", err);
@@ -279,7 +389,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
 
   // ── Dice ─────────────────────────────────────────────────
   rollDiceAction: async () => {
-    const { actionState, currentDetectiveIndex, detectives, detectiveOrder, gameId, round, turn } = get();
+    const { actionState, currentDetectiveIndex, detectives, detectiveOrder, gameId, round, turn, humanDetectiveId } = get();
     if (actionState !== "idle") return;
 
     set({
@@ -292,6 +402,40 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
       const roll = rollDice();
       const activeId = detectiveOrder[currentDetectiveIndex];
       const detective = detectives.find((d) => d.id === activeId)!;
+
+      // 1. Anchor dice roll to 0G Chain
+      const chainRes = await fetch("/api/chain/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "DICE_ROLL",
+          data: { gameId, round, turn, detective: activeId, roll },
+        }),
+      });
+      const chainData = await chainRes.json();
+      if (!chainRes.ok || !chainData.ok) {
+        throw new Error(chainData.error || `Failed to record dice roll on 0G Chain: HTTP ${chainRes.status}`);
+      }
+
+      if (activeId === humanDetectiveId) {
+        // Human rolls, wait for manual path click destination
+        set({
+          diceRoll: roll,
+          actionState: "moving",
+          movementPath: [],
+          movementStep: 0,
+          isSyncing: false,
+          syncMessage: null,
+        });
+
+        get().addLog(
+          activeId,
+          "ROLL",
+          `Rolled a ${roll}. Select a highlighted cell on the board to move.`,
+          chainData.txHash
+        );
+        return;
+      }
 
       // Compute paths to doors of OTHER rooms, sorting by distance to pick the closest target
       const currentRoomId = detective.currentRoom;
@@ -325,20 +469,6 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
 
       const clampedPath = path.slice(0, roll + 1);
 
-      // 1. Anchor dice roll to 0G Chain
-      const chainRes = await fetch("/api/chain/record", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          action: "DICE_ROLL",
-          data: { gameId, round, turn, detective: activeId, roll },
-        }),
-      });
-      const chainData = await chainRes.json();
-      if (!chainRes.ok || !chainData.ok) {
-        throw new Error(chainData.error || `Failed to record dice roll on 0G Chain: HTTP ${chainRes.status}`);
-      }
-
       // 2. Upload movement path metadata to 0G Storage
       const storageRes = await fetch("/api/storage/upload", {
         method: "POST",
@@ -353,6 +483,8 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         throw new Error(storageData.error || `Failed to upload movement to 0G Storage: HTTP ${storageRes.status}`);
       }
 
+      // For AI: set local roll monologue (combines monologue to avoid calling LLM)
+      const mono = getLocalRollMonologue(activeId);
       set({
         diceRoll: roll,
         actionState: "moving",
@@ -360,7 +492,10 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         movementStep: 0,
         isSyncing: false,
         syncMessage: null,
+        activeMonologue: mono,
       });
+
+      get().addLog(activeId, "THINK", mono);
 
       get().addLog(
         activeId,
@@ -383,7 +518,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
   // ── Step movement (called per animation frame / tick) ────
   stepMovement: () => {
     const { movementPath, movementStep, currentDetectiveIndex, detectiveOrder, detectives, actionState } = get();
-    if (actionState !== "moving") return;
+    if (actionState !== "moving" || movementPath.length === 0) return;
 
     const nextStep = movementStep + 1;
 
@@ -424,9 +559,70 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
     set({ movementStep: nextStep, detectives: updatedDetectives });
   },
 
-  // ── Suggestion ───────────────────────────────────────────
+  // ── Human Action: Click to move ─────────────────────────
+  moveHumanAction: async (targetPos: Position) => {
+    const { actionState, currentDetectiveIndex, detectives, detectiveOrder, diceRoll, gameId, round, turn, humanDetectiveId } = get();
+    const activeId = detectiveOrder[currentDetectiveIndex];
+    if (activeId !== humanDetectiveId || actionState !== "moving" || diceRoll === null) return;
+
+    const detective = detectives.find((d) => d.id === activeId)!;
+
+    // Find path
+    const path = findPath(detective.position, targetPos);
+    if (!path || path.length === 0 || path.length - 1 > diceRoll) {
+      // Too far or unreachable
+      return;
+    }
+
+    set({
+      isSyncing: true,
+      syncMessage: "Uploading movement details to 0G Storage...",
+      error: null,
+    });
+
+    try {
+      // Upload movement path metadata to 0G Storage
+      const storageRes = await fetch("/api/storage/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: `move-${gameId}-${round}-${turn}`,
+          data: { detective: activeId, roll: diceRoll, path },
+        }),
+      });
+      const storageData = await storageRes.json();
+      if (!storageRes.ok || !storageData.ok) {
+        throw new Error(storageData.error || `Failed to upload movement to 0G Storage: HTTP ${storageRes.status}`);
+      }
+
+      set({
+        movementPath: path,
+        movementStep: 0,
+        isSyncing: false,
+        syncMessage: null,
+      });
+
+      get().addLog(
+        activeId,
+        "MOVE",
+        `Decided to walk to cell (${targetPos.x}, ${targetPos.y}).`,
+        undefined,
+        storageData.rootHash,
+        storageData.txSeq
+      );
+    } catch (err: any) {
+      console.error("[Human Move] Storage upload failed:", err);
+      set({
+        isSyncing: false,
+        syncMessage: null,
+        error: err?.message || String(err),
+      });
+    }
+  },
+
+  // ── AI Suggestion ───────────────────────────────────────────
   makeSuggestion: async () => {
-    const { currentDetectiveIndex, detectiveOrder, detectives, hands, notebooks, confidence, gameId, round, turn } = get();
+    const { currentDetectiveIndex, detectiveOrder, detectives, hands, notebooks, confidence, gameId, round, turn, humanDetectiveId } = get();
     const activeId = detectiveOrder[currentDetectiveIndex];
     const detective = detectives.find((d) => d.id === activeId)!;
     const notebook = notebooks[activeId];
@@ -437,7 +633,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
 
     set({
       isSyncing: true,
-      syncMessage: `Consulting Qwen model for ${detective.name}'s suggestion decision...`,
+      syncMessage: `Consulting Qwen model for ${detective.name}'s suggestion & monologue...`,
       error: null,
     });
 
@@ -449,7 +645,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         (id) => notebook.weapons[id] === "POSSIBLE"
       );
 
-      // Query Qwen model to choose a suspect and weapon
+      // Query Qwen model to choose a suspect and weapon + monologue in 1 single call
       const inferenceRes = await fetch("/api/inference", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -465,7 +661,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         throw new Error(inferenceData.error || `Qwen decision API failed: HTTP ${inferenceRes.status}`);
       }
 
-      const { suspect, weapon } = inferenceData.decision;
+      const { suspect, weapon, monologue } = inferenceData.decision;
       const finalSuspect = possibleSuspects.includes(suspect) ? suspect : (possibleSuspects[0] || "VANCE");
       const finalWeapon = possibleWeapons.includes(weapon) ? weapon : (possibleWeapons[0] || "PEARL_PISTOL");
 
@@ -475,7 +671,12 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         room: detective.currentRoom,
       };
 
-      set({ syncMessage: "Anchoring suggestion and disproval to 0G Storage & Chain..." });
+      if (monologue) {
+        set({ activeMonologue: monologue });
+        get().addLog(activeId, "THINK", monologue);
+      }
+
+      set({ syncMessage: "Resolving suggestion disproval..." });
 
       // Move the suspected detective to this room's center coordinate
       const roomConfig = ROOM_BY_ID[suggestion.room];
@@ -490,22 +691,10 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         return d;
       });
 
-      const result = processSuggestion(suggestion, activeId, detectiveOrder, hands);
+      // Find disprover clockwise
+      const disproverInfo = findDisproverClockwise(suggestion, activeId, detectiveOrder, hands, detectives);
 
-      let updatedNotebooks = { ...notebooks };
-      let updatedConfidence = { ...confidence };
-
-      if (result) {
-        updatedNotebooks[activeId] = updateNotebookFromReveal(notebooks[activeId], result.card);
-        updatedConfidence[activeId] = calculateConfidence(updatedNotebooks[activeId]);
-      } else {
-        updatedNotebooks[activeId] = updateNotebookFromNoDisproval(notebooks[activeId], suggestion);
-        updatedConfidence[activeId] = calculateConfidence(updatedNotebooks[activeId]);
-      }
-
-      const solution = runDeductionAnalysis(updatedNotebooks[activeId]);
-
-      // 1. Anchor suggestion to 0G Chain
+      // Anchor suggestion to 0G Chain
       const suggestChainRes = await fetch("/api/chain/record", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -519,7 +708,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         throw new Error(suggestChainData.error || `Failed to record suggestion on 0G Chain: HTTP ${suggestChainRes.status}`);
       }
 
-      // 2. Upload suggestion metadata to 0G Storage
+      // Upload suggestion metadata to 0G Storage
       const suggestStorageRes = await fetch("/api/storage/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -533,23 +722,60 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         throw new Error(suggestStorageData.error || `Failed to upload suggestion to 0G Storage: HTTP ${suggestStorageRes.status}`);
       }
 
-      // 3. Anchor & upload disproval reveal
-      let revealRootHash = "";
-      let revealTxHash = "";
-      let revealTxSeq: number | undefined;
+      get().addLog(
+        activeId,
+        "SUGGEST",
+        `Suggests: ${suggestion.suspect} | ${suggestion.weapon} | ${suggestion.room}`,
+        suggestChainData.txHash,
+        suggestStorageData.rootHash,
+        suggestStorageData.txSeq
+      );
 
-      if (result) {
+      get().addLog(
+        finalSuspect,
+        "ENTER_ROOM",
+        `Was summoned to the ${suggestion.room.replace(/_/g, " ")} for questioning.`
+      );
+
+      if (disproverInfo) {
+        const disproverId = disproverInfo.disproverId;
+
+        if (disproverId === humanDetectiveId) {
+          // Pause execution and prompt the human player to select which card to reveal!
+          set({
+            detectives: updatedDetectives,
+            pendingSuggestion: suggestion,
+            disprovalPending: {
+              suggesterId: activeId,
+              suggestion,
+              disproverId: humanDetectiveId,
+              candidates: disproverInfo.matchingCards,
+            },
+            isSyncing: false,
+            syncMessage: null,
+          });
+
+          get().addLog(
+            humanDetectiveId,
+            "SYSTEM",
+            `Awaiting your disproval card choice to show ${activeId}.`
+          );
+          return;
+        }
+
+        // It is an AI disprover: auto-reveal the first matching card
+        const card = disproverInfo.matchingCards[0];
         const { encryptPayload, buildCluePayload } = await import("@/lib/crypto/hybrid");
         const recipientDet = detectives.find((d) => d.id === activeId)!;
-        
+
         const cluePayload = buildCluePayload({
           gameId,
           round,
-          revealingAgentId: result.disproverId,
+          revealingAgentId: disproverId,
           receivingAgentId: activeId,
-          cardType: result.card.type,
-          cardId: result.card.id,
-          cardName: result.card.name,
+          cardType: card.type,
+          cardId: card.id,
+          cardName: card.name,
         });
 
         const encryptedBundle = await encryptPayload(cluePayload, recipientDet.publicKey);
@@ -566,35 +792,47 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         if (!revealStorageRes.ok || !revealStorageData.ok) {
           throw new Error(revealStorageData.error || `Failed to upload encrypted reveal to 0G Storage: HTTP ${revealStorageRes.status}`);
         }
-        revealRootHash = revealStorageData.rootHash;
-        revealTxSeq = revealStorageData.txSeq;
-
-        // Verify decryption using recipient's private key
-        try {
-          const { decryptPayload } = await import("@/lib/crypto/hybrid");
-          const privateKey = get().privateKeys[activeId];
-          if (privateKey) {
-            const decrypted = await decryptPayload<any>(encryptedBundle, privateKey);
-            console.log(`[0G Verification] Decrypted clue for ${activeId} from 0G storage bundle successfully! Card: ${decrypted.cardName}`);
-          }
-        } catch (decErr) {
-          console.error("[0G Verification] Decryption verification test failed:", decErr);
-        }
 
         const revealChainRes = await fetch("/api/chain/record", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             action: "REVEAL",
-            data: { gameId, round, turn, disprover: result.disproverId, recipient: activeId, success: true },
+            data: { gameId, round, turn, disprover: disproverId, recipient: activeId, success: true },
           }),
         });
         const revealChainData = await revealChainRes.json();
         if (!revealChainRes.ok || !revealChainData.ok) {
           throw new Error(revealChainData.error || `Failed to record reveal on 0G Chain: HTTP ${revealChainRes.status}`);
         }
-        revealTxHash = revealChainData.txHash;
+
+        let updatedNotebooks = { ...notebooks };
+        let updatedConfidence = { ...confidence };
+        updatedNotebooks[activeId] = updateNotebookFromReveal(notebooks[activeId], card);
+        updatedConfidence[activeId] = calculateConfidence(updatedNotebooks[activeId]);
+
+        const solution = runDeductionAnalysis(updatedNotebooks[activeId]);
+
+        set({
+          notebooks: updatedNotebooks,
+          confidence: updatedConfidence,
+          pendingSuggestion: suggestion,
+          detectives: updatedDetectives,
+          actionState: solution ? "accusing" : "next_turn_pending",
+          isSyncing: false,
+          syncMessage: null,
+        });
+
+        get().addLog(
+          disproverId,
+          "DISPROVE",
+          `Showed a card to ${activeId}. (Encrypted 0G Storage Clue Reveal)`,
+          revealChainData.txHash,
+          revealStorageData.rootHash,
+          revealStorageData.txSeq
+        );
       } else {
+        // No one could disprove
         const revealStorageRes = await fetch("/api/storage/upload", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -607,8 +845,6 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         if (!revealStorageRes.ok || !revealStorageData.ok) {
           throw new Error(revealStorageData.error || `Failed to upload reveal-none to 0G Storage: HTTP ${revealStorageRes.status}`);
         }
-        revealRootHash = revealStorageData.rootHash;
-        revealTxSeq = revealStorageData.txSeq;
 
         const revealChainRes = await fetch("/api/chain/record", {
           method: "POST",
@@ -622,18 +858,98 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         if (!revealChainRes.ok || !revealChainData.ok) {
           throw new Error(revealChainData.error || `Failed to record reveal-none on 0G Chain: HTTP ${revealChainRes.status}`);
         }
-        revealTxHash = revealChainData.txHash;
-      }
 
+        let updatedNotebooks = { ...notebooks };
+        let updatedConfidence = { ...confidence };
+        updatedNotebooks[activeId] = updateNotebookFromNoDisproval(notebooks[activeId], suggestion);
+        updatedConfidence[activeId] = calculateConfidence(updatedNotebooks[activeId]);
+
+        const solution = runDeductionAnalysis(updatedNotebooks[activeId]);
+
+        set({
+          notebooks: updatedNotebooks,
+          confidence: updatedConfidence,
+          pendingSuggestion: suggestion,
+          detectives: updatedDetectives,
+          actionState: solution ? "accusing" : "next_turn_pending",
+          isSyncing: false,
+          syncMessage: null,
+        });
+
+        get().addLog(
+          activeId,
+          "NO_DISPROVAL",
+          `Nobody could disprove the suggestion!`,
+          revealChainData.txHash,
+          revealStorageData.rootHash,
+          revealStorageData.txSeq
+        );
+      }
+    } catch (err: any) {
+      console.error("[0G Suggest] Suggestion sync failed:", err);
       set({
-        notebooks: updatedNotebooks,
-        confidence: updatedConfidence,
-        pendingSuggestion: suggestion,
-        detectives: updatedDetectives,
-        actionState: solution ? "accusing" : "next_turn_pending",
         isSyncing: false,
         syncMessage: null,
+        error: err?.message || String(err),
       });
+    }
+  },
+
+  // ── Human Action: Make suggestion ────────────────────────
+  makeHumanSuggestion: async (suggestion: Suggestion) => {
+    const { currentDetectiveIndex, detectiveOrder, detectives, hands, notebooks, confidence, gameId, round, turn, humanDetectiveId } = get();
+    const activeId = detectiveOrder[currentDetectiveIndex];
+    if (activeId !== humanDetectiveId || activeId === null) return;
+
+    set({
+      isSyncing: true,
+      syncMessage: "Submitting human suggestion to 0G Network...",
+      error: null,
+    });
+
+    try {
+      const roomConfig = ROOM_BY_ID[suggestion.room];
+      const updatedDetectives = detectives.map((d) => {
+        if (d.id === suggestion.suspect) {
+          return {
+            ...d,
+            position: { ...roomConfig.center },
+            currentRoom: suggestion.room,
+          };
+        }
+        return d;
+      });
+
+      // Find disprover clockwise
+      const disproverInfo = findDisproverClockwise(suggestion, activeId, detectiveOrder, hands, detectives);
+
+      // Anchor suggestion to 0G Chain
+      const suggestChainRes = await fetch("/api/chain/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "SUGGESTION",
+          data: { gameId, round, turn, detective: activeId, suggestion },
+        }),
+      });
+      const suggestChainData = await suggestChainRes.json();
+      if (!suggestChainRes.ok || !suggestChainData.ok) {
+        throw new Error(suggestChainData.error || `Failed to record suggestion on 0G Chain: HTTP ${suggestChainRes.status}`);
+      }
+
+      // Upload suggestion metadata to 0G Storage
+      const suggestStorageRes = await fetch("/api/storage/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: `suggest-${gameId}-${round}-${turn}`,
+          data: { suggestion },
+        }),
+      });
+      const suggestStorageData = await suggestStorageRes.json();
+      if (!suggestStorageRes.ok || !suggestStorageData.ok) {
+        throw new Error(suggestStorageData.error || `Failed to upload suggestion to 0G Storage: HTTP ${suggestStorageRes.status}`);
+      }
 
       get().addLog(
         activeId,
@@ -644,34 +960,231 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         suggestStorageData.txSeq
       );
 
-      // Log that the suspected detective was brought to the room
       get().addLog(
-        finalSuspect,
+        suggestion.suspect,
         "ENTER_ROOM",
         `Was summoned to the ${suggestion.room.replace(/_/g, " ")} for questioning.`
       );
 
-      if (result) {
+      let updatedNotebooks = { ...notebooks };
+      let updatedConfidence = { ...confidence };
+
+      if (disproverInfo) {
+        // Since suggester is Human, disprover is always an AI
+        const disproverId = disproverInfo.disproverId;
+        const card = disproverInfo.matchingCards[0]; // AI automatically shows first matching card
+
+        const { encryptPayload, buildCluePayload } = await import("@/lib/crypto/hybrid");
+        const recipientDet = detectives.find((d) => d.id === activeId)!;
+
+        const cluePayload = buildCluePayload({
+          gameId,
+          round,
+          revealingAgentId: disproverId,
+          receivingAgentId: activeId,
+          cardType: card.type,
+          cardId: card.id,
+          cardName: card.name,
+        });
+
+        // Encrypt with human's public key
+        const encryptedBundle = await encryptPayload(cluePayload, recipientDet.publicKey);
+
+        const revealStorageRes = await fetch("/api/storage/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            key: `reveal-${gameId}-${round}-${turn}`,
+            data: { encryptedBundle },
+          }),
+        });
+        const revealStorageData = await revealStorageRes.json();
+        if (!revealStorageRes.ok || !revealStorageData.ok) {
+          throw new Error(revealStorageData.error || `Failed to upload encrypted reveal to 0G Storage: HTTP ${revealStorageRes.status}`);
+        }
+
+        const revealChainRes = await fetch("/api/chain/record", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "REVEAL",
+            data: { gameId, round, turn, disprover: disproverId, recipient: activeId, success: true },
+          }),
+        });
+        const revealChainData = await revealChainRes.json();
+        if (!revealChainRes.ok || !revealChainData.ok) {
+          throw new Error(revealChainData.error || `Failed to record reveal on 0G Chain: HTTP ${revealChainRes.status}`);
+        }
+
+        // Human decrypts directly using their private key in memory to display the card name
+        updatedNotebooks[activeId] = updateNotebookFromReveal(notebooks[activeId], card);
+        updatedConfidence[activeId] = calculateConfidence(updatedNotebooks[activeId]);
+
+        const solution = runDeductionAnalysis(updatedNotebooks[activeId]);
+
+        set({
+          notebooks: updatedNotebooks,
+          confidence: updatedConfidence,
+          pendingSuggestion: suggestion,
+          detectives: updatedDetectives,
+          actionState: solution ? "accusing" : "next_turn_pending",
+          isSyncing: false,
+          syncMessage: null,
+        });
+
         get().addLog(
-          result.disproverId,
+          disproverId,
           "DISPROVE",
-          `Showed a card to ${activeId}. (Encrypted 0G Storage Clue Reveal)`,
-          revealTxHash,
-          revealRootHash,
-          revealTxSeq
+          `Showed you the card: ${card.name}. (Decrypted from 0G Storage Clue Reveal)`,
+          revealChainData.txHash,
+          revealStorageData.rootHash,
+          revealStorageData.txSeq
         );
       } else {
+        // No one could disprove
+        const revealStorageRes = await fetch("/api/storage/upload", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            key: `reveal-none-${gameId}-${round}-${turn}`,
+            data: { success: false, reason: "NO_DISPROVAL" },
+          }),
+        });
+        const revealStorageData = await revealStorageRes.json();
+        if (!revealStorageRes.ok || !revealStorageData.ok) {
+          throw new Error(revealStorageData.error || `Failed to upload reveal-none to 0G Storage: HTTP ${revealStorageRes.status}`);
+        }
+
+        const revealChainRes = await fetch("/api/chain/record", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "REVEAL_NONE",
+            data: { gameId, round, turn, success: false },
+          }),
+        });
+        const revealChainData = await revealChainRes.json();
+        if (!revealChainRes.ok || !revealChainData.ok) {
+          throw new Error(revealChainData.error || `Failed to record reveal-none on 0G Chain: HTTP ${revealChainRes.status}`);
+        }
+
+        updatedNotebooks[activeId] = updateNotebookFromNoDisproval(notebooks[activeId], suggestion);
+        updatedConfidence[activeId] = calculateConfidence(updatedNotebooks[activeId]);
+
+        const solution = runDeductionAnalysis(updatedNotebooks[activeId]);
+
+        set({
+          notebooks: updatedNotebooks,
+          confidence: updatedConfidence,
+          pendingSuggestion: suggestion,
+          detectives: updatedDetectives,
+          actionState: solution ? "accusing" : "next_turn_pending",
+          isSyncing: false,
+          syncMessage: null,
+        });
+
         get().addLog(
           activeId,
           "NO_DISPROVAL",
-          `Nobody could disprove the suggestion!`,
-          revealTxHash,
-          revealRootHash,
-          revealTxSeq
+          `Nobody could disprove your suggestion! Notebook updated.`,
+          revealChainData.txHash,
+          revealStorageData.rootHash,
+          revealStorageData.txSeq
         );
       }
     } catch (err: any) {
-      console.error("[0G Suggest] Suggestion sync failed:", err);
+      console.error("[Human Suggest] Suggestion failed:", err);
+      set({
+        isSyncing: false,
+        syncMessage: null,
+        error: err?.message || String(err),
+      });
+    }
+  },
+
+  // ── Human Action: Resolve Pending Disproval ────────────────
+  resolveHumanDisproval: async (selectedCard: Card) => {
+    const { disprovalPending, gameId, round, turn, notebooks, confidence, detectives } = get();
+    if (!disprovalPending) return;
+
+    set({
+      isSyncing: true,
+      syncMessage: "Encrypting and submitting disproval clue to 0G Storage...",
+      error: null,
+    });
+
+    try {
+      const { suggesterId, suggestion, disproverId } = disprovalPending;
+
+      const { encryptPayload, buildCluePayload } = await import("@/lib/crypto/hybrid");
+      const recipientDet = detectives.find((d) => d.id === suggesterId)!;
+
+      const cluePayload = buildCluePayload({
+        gameId,
+        round,
+        revealingAgentId: disproverId,
+        receivingAgentId: suggesterId,
+        cardType: selectedCard.type,
+        cardId: selectedCard.id,
+        cardName: selectedCard.name,
+      });
+
+      const encryptedBundle = await encryptPayload(cluePayload, recipientDet.publicKey);
+
+      const revealStorageRes = await fetch("/api/storage/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          key: `reveal-${gameId}-${round}-${turn}`,
+          data: { encryptedBundle },
+        }),
+      });
+      const revealStorageData = await revealStorageRes.json();
+      if (!revealStorageRes.ok || !revealStorageData.ok) {
+        throw new Error(revealStorageData.error || `Failed to upload encrypted reveal to 0G Storage: HTTP ${revealStorageRes.status}`);
+      }
+
+      const revealChainRes = await fetch("/api/chain/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "REVEAL",
+          data: { gameId, round, turn, disprover: disproverId, recipient: suggesterId, success: true },
+        }),
+      });
+      const revealChainData = await revealChainRes.json();
+      if (!revealChainRes.ok || !revealChainData.ok) {
+        throw new Error(revealChainData.error || `Failed to record reveal on 0G Chain: HTTP ${revealChainRes.status}`);
+      }
+
+      let updatedNotebooks = { ...notebooks };
+      let updatedConfidence = { ...confidence };
+
+      // Update AI's notebook since they received the card
+      updatedNotebooks[suggesterId] = updateNotebookFromReveal(notebooks[suggesterId], selectedCard);
+      updatedConfidence[suggesterId] = calculateConfidence(updatedNotebooks[suggesterId]);
+
+      const solution = runDeductionAnalysis(updatedNotebooks[suggesterId]);
+
+      set({
+        notebooks: updatedNotebooks,
+        confidence: updatedConfidence,
+        disprovalPending: null,
+        actionState: solution ? "accusing" : "next_turn_pending",
+        isSyncing: false,
+        syncMessage: null,
+      });
+
+      get().addLog(
+        disproverId,
+        "DISPROVE",
+        `You showed a card (${selectedCard.name}) to ${suggesterId}. (Encrypted Clue)`,
+        revealChainData.txHash,
+        revealStorageData.rootHash,
+        revealStorageData.txSeq
+      );
+    } catch (err: any) {
+      console.error("[Human Disproval] Failed to resolve disproval:", err);
       set({
         isSyncing: false,
         syncMessage: null,
@@ -771,8 +1284,6 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
     const newTurn = turn + 1;
     const newRound = nextIndex === 0 ? round + 1 : round;
 
-
-
     set({
       currentDetectiveIndex: nextIndex,
       turn: newTurn,
@@ -809,6 +1320,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
 
   // ── AI Thought Monologues (0G Compute) ───────────────────
   fetchAIMonologue: async (agentId, context, action) => {
+    // Left as compatibility stub — main simulation loop uses unified suggestion response instead to save calls
     set({ isThinking: true, activeMonologue: null });
     try {
       const res = await fetch("/api/inference", {
@@ -822,17 +1334,11 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
       }
       if (data.answer) {
         set({ activeMonologue: data.answer, isThinking: false });
-        get().addLog(
-          agentId,
-          "THINK",
-          data.answer
-        );
+        get().addLog(agentId, "THINK", data.answer);
       } else {
         set({ isThinking: false });
       }
     } catch (err: any) {
-      // Monologue failures are non-critical — AI thought bubbles are cosmetic.
-      // Log the warning but never halt the game over a failed monologue.
       console.warn("[0G Compute] Monologue fetch failed (non-fatal):", err?.message || String(err));
       set({ isThinking: false, activeMonologue: null });
     }

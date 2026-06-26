@@ -79,6 +79,8 @@ export function findPath(
 ): Position[] | null {
   if (start.x === target.x && start.y === target.y) return [start];
 
+  // If we started inside a room and the neighbor is in the same room, it's walkable
+  const startRoomId = getRoomAt(start.x, start.y);
   const queue: { pos: Position; path: Position[] }[] = [
     { pos: start, path: [start] },
   ];
@@ -93,7 +95,19 @@ export function findPath(
       const ny = y + dy;
       const key = `${nx},${ny}`;
 
-      if (visited.has(key) || !isWalkable(nx, ny)) continue;
+      if (visited.has(key)) continue;
+
+      let walkable = false;
+      if (nx >= 0 && nx < BOARD_SIZE && ny >= 0 && ny < BOARD_SIZE) {
+        if (startRoomId && getRoomAt(nx, ny) === startRoomId) {
+          walkable = true;
+        } else {
+          const type = getCellType(nx, ny);
+          walkable = type === "hallway" || type === "door";
+        }
+      }
+
+      if (!walkable) continue;
 
       visited.add(key);
       const newPath = [...current.path, { x: nx, y: ny }];
@@ -105,6 +119,55 @@ export function findPath(
   }
 
   return null; // Target unreachable
+}
+
+/**
+ * Returns all grid cells reachable from a start position within maxSteps.
+ * Handles room boundary exceptions correctly.
+ */
+export function getReachableCells(
+  start: Position,
+  maxSteps: number
+): Position[] {
+  const startRoomId = getRoomAt(start.x, start.y);
+  const queue: { pos: Position; steps: number }[] = [{ pos: start, steps: 0 }];
+  const visited = new Set<string>([`${start.x},${start.y}`]);
+  const reachable: Position[] = [];
+
+  while (queue.length > 0) {
+    const { pos, steps } = queue.shift()!;
+
+    if (steps > 0) {
+      reachable.push(pos);
+    }
+
+    if (steps >= maxSteps) continue;
+
+    for (const { dx, dy } of CARDINAL) {
+      const nx = pos.x + dx;
+      const ny = pos.y + dy;
+      const key = `${nx},${ny}`;
+
+      if (visited.has(key)) continue;
+
+      let walkable = false;
+      if (nx >= 0 && nx < BOARD_SIZE && ny >= 0 && ny < BOARD_SIZE) {
+        if (startRoomId && getRoomAt(nx, ny) === startRoomId) {
+          walkable = true;
+        } else {
+          const type = getCellType(nx, ny);
+          walkable = type === "hallway" || type === "door";
+        }
+      }
+
+      if (walkable) {
+        visited.add(key);
+        queue.push({ pos: { x: nx, y: ny }, steps: steps + 1 });
+      }
+    }
+  }
+
+  return reachable;
 }
 
 /**
@@ -145,3 +208,4 @@ export function walkPath(
   const stepCount = Math.min(maxSteps, path.length - 1);
   return path[stepCount];
 }
+
