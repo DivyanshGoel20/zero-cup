@@ -32,10 +32,10 @@ const NODE_POSITIONS: Record<
   LIBRARY: { x: 450, y: 130, label: "Library", image: "/room_library.png", color: "#06b6d4", type: "room" },
   WINE_CELLAR: { x: 425, y: 172, label: "Wine Cellar", image: "/room_wine_cellar.png", color: "#06b6d4", type: "room" },
   GRAND_FOYER: { x: 445, y: 215, label: "Foyer", image: "/room_grand_foyer.png", color: "#06b6d4", type: "room" },
-  MASTER_BEDROOM: { x: 420, y: 258, label: "Bedroom", image: "/room_card_bg.png", color: "#06b6d4", type: "room" },
-  KITCHEN: { x: 450, y: 300, label: "Kitchen", image: "/room_card_bg.png", color: "#06b6d4", type: "room" },
-  DINING_HALL: { x: 425, y: 342, label: "Dining Hall", image: "/room_card_bg.png", color: "#06b6d4", type: "room" },
-  SECRET_STUDY: { x: 445, y: 385, label: "Study", image: "/room_card_bg.png", color: "#06b6d4", type: "room" },
+  MASTER_BEDROOM: { x: 420, y: 258, label: "Bedroom", image: "/room_master_bedroom.png", color: "#06b6d4", type: "room" },
+  KITCHEN: { x: 450, y: 300, label: "Kitchen", image: "/room_kitchen.png", color: "#06b6d4", type: "room" },
+  DINING_HALL: { x: 425, y: 342, label: "Dining Hall", image: "/room_dining_hall.png", color: "#06b6d4", type: "room" },
+  SECRET_STUDY: { x: 445, y: 385, label: "Study", image: "/room_secret_study.png", color: "#06b6d4", type: "room" },
 
   // Envelope / Solution Node
   ENVELOPE: { x: 550, y: 215, label: "Envelope", image: "/logo.png", color: "#b89255", type: "envelope" },

@@ -71,6 +71,7 @@ const CARDINAL = [
 
 /**
  * Finds the shortest walkable path between two positions using BFS.
+ * Only hallway and door cells are traversable — room interiors are walls.
  * Returns the full path (including start), or null if unreachable.
  */
 export function findPath(
@@ -79,8 +80,6 @@ export function findPath(
 ): Position[] | null {
   if (start.x === target.x && start.y === target.y) return [start];
 
-  // If we started inside a room and the neighbor is in the same room, it's walkable
-  const startRoomId = getRoomAt(start.x, start.y);
   const queue: { pos: Position; path: Position[] }[] = [
     { pos: start, path: [start] },
   ];
@@ -96,18 +95,7 @@ export function findPath(
       const key = `${nx},${ny}`;
 
       if (visited.has(key)) continue;
-
-      let walkable = false;
-      if (nx >= 0 && nx < BOARD_SIZE && ny >= 0 && ny < BOARD_SIZE) {
-        if (startRoomId && getRoomAt(nx, ny) === startRoomId) {
-          walkable = true;
-        } else {
-          const type = getCellType(nx, ny);
-          walkable = type === "hallway" || type === "door";
-        }
-      }
-
-      if (!walkable) continue;
+      if (!isWalkable(nx, ny)) continue;
 
       visited.add(key);
       const newPath = [...current.path, { x: nx, y: ny }];
@@ -123,13 +111,12 @@ export function findPath(
 
 /**
  * Returns all grid cells reachable from a start position within maxSteps.
- * Handles room boundary exceptions correctly.
+ * Only hallway and door cells are traversable — room interiors are walls.
  */
 export function getReachableCells(
   start: Position,
   maxSteps: number
 ): Position[] {
-  const startRoomId = getRoomAt(start.x, start.y);
   const queue: { pos: Position; steps: number }[] = [{ pos: start, steps: 0 }];
   const visited = new Set<string>([`${start.x},${start.y}`]);
   const reachable: Position[] = [];
@@ -149,21 +136,10 @@ export function getReachableCells(
       const key = `${nx},${ny}`;
 
       if (visited.has(key)) continue;
+      if (!isWalkable(nx, ny)) continue;
 
-      let walkable = false;
-      if (nx >= 0 && nx < BOARD_SIZE && ny >= 0 && ny < BOARD_SIZE) {
-        if (startRoomId && getRoomAt(nx, ny) === startRoomId) {
-          walkable = true;
-        } else {
-          const type = getCellType(nx, ny);
-          walkable = type === "hallway" || type === "door";
-        }
-      }
-
-      if (walkable) {
-        visited.add(key);
-        queue.push({ pos: { x: nx, y: ny }, steps: steps + 1 });
-      }
+      visited.add(key);
+      queue.push({ pos: { x: nx, y: ny }, steps: steps + 1 });
     }
   }
 
@@ -207,5 +183,64 @@ export function walkPath(
   // path[0] is the starting cell; each subsequent cell costs one step
   const stepCount = Math.min(maxSteps, path.length - 1);
   return path[stepCount];
+}
+
+/**
+ * Produces a path of exactly `steps` hallway steps from `start`, treating
+ * any cell in `occupied` as blocked (so agents never land on each other).
+ *
+ * Strategy: do a DFS-like walk, greedily advancing; when we hit a dead-end
+ * (or an occupied cell) we backtrack one step and go a different direction,
+ * effectively bouncing back and forth to spend all remaining moves.
+ *
+ * Returns the full path array including the start position.
+ */
+export function walkFullSteps(
+  start: Position,
+  steps: number,
+  occupied: Set<string> = new Set()
+): Position[] {
+  // Direction priority: prefer continuing forward, then branch, then reverse
+  const path: Position[] = [start];
+  const DIRS = [
+    { dx: 1, dy: 0 },
+    { dx: -1, dy: 0 },
+    { dx: 0, dy: 1 },
+    { dx: 0, dy: -1 },
+  ];
+
+  for (let i = 0; i < steps; i++) {
+    const cur = path[path.length - 1];
+    const prev = path.length >= 2 ? path[path.length - 2] : null;
+
+    // Try each direction, preferring not to reverse unless forced
+    let moved = false;
+    for (const { dx, dy } of DIRS) {
+      const nx = cur.x + dx;
+      const ny = cur.y + dy;
+      const key = `${nx},${ny}`;
+      // Don't go back to where we just came from (avoid immediate reversal)
+      if (prev && nx === prev.x && ny === prev.y) continue;
+      // Don't step onto occupied cells
+      if (occupied.has(key)) continue;
+      if (!isWalkable(nx, ny)) continue;
+
+      path.push({ x: nx, y: ny });
+      moved = true;
+      break;
+    }
+
+    if (!moved) {
+      // Only option is to reverse — step back
+      if (prev) {
+        path.push({ x: prev.x, y: prev.y });
+      } else {
+        // Completely stuck (shouldn't happen on a connected hallway) — stay
+        path.push({ x: cur.x, y: cur.y });
+      }
+    }
+  }
+
+  return path;
 }
 

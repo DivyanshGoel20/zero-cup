@@ -32,6 +32,25 @@ const getCardDetails = (id: string) => {
       image: `/weapon_${suffix}.png`
     };
   }
+  const ROOM_IDS = [
+    "BILLIARD_ROOM",
+    "CONSERVATORY",
+    "LIBRARY",
+    "WINE_CELLAR",
+    "GRAND_FOYER",
+    "MASTER_BEDROOM",
+    "KITCHEN",
+    "DINING_HALL",
+    "SECRET_STUDY"
+  ];
+  if (ROOM_IDS.includes(cleanId)) {
+    return {
+      type: "ROOM",
+      icon: "🚪",
+      color: "text-[#06b6d4] border-[#06b6d4]/20",
+      image: `/room_${cleanId.toLowerCase()}.png`
+    };
+  }
   return {
     type: "ROOM",
     icon: "🚪",

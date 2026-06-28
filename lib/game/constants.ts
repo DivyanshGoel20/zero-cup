@@ -116,7 +116,7 @@ export const AI_PERSONALITIES: Record<DetectiveId, AIPersonality> = {
 export const STARTING_POSITIONS: Record<DetectiveId, Position> = {
   VANCE:    { x: 3,  y: 0  },
   ROSEWOOD: { x: 8,  y: 0  },
-  BLACKWOOD:{ x: 11, y: 4  },
+  BLACKWOOD:{ x: 11, y: 3  }, // fixed: (11,4) was inside MASTER_BEDROOM — (11,3) is the hallway row
   STERLING: { x: 11, y: 8  },
   ASHCROFT: { x: 3,  y: 11 },
 };
@@ -173,11 +173,16 @@ export const ROOMS: readonly RoomConfig[] = [
     id: "GRAND_FOYER",
     name: "Grand Foyer",
     minX: 4, maxX: 7, minY: 4, maxY: 7,
+    //
+    // All 8 doors sit on the room's own boundary cells (inside minX/maxX/minY/maxY),
+    // never in the open hallway. The hallway cells adjacent to each door are still
+    // walkable, so agents naturally enter/exit through whichever door is closest.
+    //
     doors: [
-      { x: 5, y: 3 }, { x: 6, y: 3 },
-      { x: 4, y: 5 }, { x: 4, y: 6 },
-      { x: 7, y: 5 }, { x: 7, y: 6 },
-      { x: 5, y: 8 }, { x: 6, y: 8 },
+      { x: 5, y: 4 }, { x: 6, y: 4 }, // top wall    (y=4 = minY, not corners 4,4 or 7,4)
+      { x: 4, y: 5 }, { x: 4, y: 6 }, // left wall   (x=4 = minX, not corners 4,4 or 4,7)
+      { x: 7, y: 5 }, { x: 7, y: 6 }, // right wall  (x=7 = maxX, not corners 7,4 or 7,7)
+      { x: 5, y: 7 }, { x: 6, y: 7 }, // bottom wall (y=7 = maxY, not corners 4,7 or 7,7)
     ],
     center: { x: 5, y: 5 },
   },

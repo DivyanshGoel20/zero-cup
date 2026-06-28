@@ -35,7 +35,7 @@ import {
   calculateConfidence,
   checkAIAccusationDecision,
 } from "@/lib/game/deduction";
-import { findPath, getReachableDoors, walkPath, getRoomAt } from "@/lib/game/board";
+import { findPath, getReachableDoors, walkPath, getRoomAt, walkFullSteps } from "@/lib/game/board";
 import { getAddressFromPrivateKey } from "@/lib/zeroG/chain";
 
 // ============================================================
@@ -444,20 +444,35 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         return;
       }
 
-      // Compute paths to doors of OTHER rooms, sorting by distance to pick the closest target
+      // Build a set of cells occupied by OTHER living agents so we never
+      // plan a path that ends with two agents on the same square.
+      const occupiedCells = new Set<string>(
+        detectives
+          .filter((d) => d.id !== activeId && !d.eliminated)
+          .map((d) => `${d.position.x},${d.position.y}`)
+      );
+
+      // Compute paths to doors of OTHER rooms.
+      // Only include doors that are (a) not occupied and (b) reachable within the dice roll.
       const currentRoomId = detective.currentRoom;
       const candidatePaths: { roomId: RoomId; door: Position; distance: number; path: Position[]; score?: number }[] = [];
       for (const room of ROOMS) {
         if (room.id === currentRoomId) continue;
         for (const door of room.doors) {
+          // Skip doors occupied by another agent
+          if (occupiedCells.has(`${door.x},${door.y}`)) continue;
           const p = findPath(detective.position, door);
           if (p && p.length > 1) {
-            candidatePaths.push({
-              roomId: room.id as RoomId,
-              door,
-              distance: p.length - 1,
-              path: p,
-            });
+            const dist = p.length - 1;
+            // Only consider rooms we can actually reach within the roll
+            if (dist <= roll) {
+              candidatePaths.push({
+                roomId: room.id as RoomId,
+                door,
+                distance: dist,
+                path: p,
+              });
+            }
           }
         }
       }
@@ -483,7 +498,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
           unruledOutCandidates.sort((a, b) => a.distance - b.distance);
           chosenPathInfo = unruledOutCandidates[0];
           decisionReasoning = `methodically targets the unvisited ${ROOM_BY_ID[chosenPathInfo.roomId]?.name || chosenPathInfo.roomId} to gather new evidence.`;
-        } else {
+        } else if (candidatePaths.length > 0) {
           candidatePaths.sort((a, b) => a.distance - b.distance);
           chosenPathInfo = candidatePaths[0];
           decisionReasoning = `has visited all candidate rooms. Targetting closest room ${ROOM_BY_ID[chosenPathInfo.roomId]?.name || chosenPathInfo.roomId} as fallback.`;
@@ -507,7 +522,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
           scoredCandidates.sort((a, b) => b.score - a.score);
           chosenPathInfo = scoredCandidates[0];
           decisionReasoning = `calculates high information gain for ${ROOM_BY_ID[chosenPathInfo.roomId]?.name || chosenPathInfo.roomId} (probability density score: ${(chosenPathInfo.score ?? 0).toFixed(1)}).`;
-        } else {
+        } else if (candidatePaths.length > 0) {
           candidatePaths.sort((a, b) => a.distance - b.distance);
           chosenPathInfo = candidatePaths[0];
           decisionReasoning = `targets closest room ${ROOM_BY_ID[chosenPathInfo.roomId]?.name || chosenPathInfo.roomId} to maintain efficiency.`;
@@ -538,7 +553,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
           } else {
             decisionReasoning = `targets the closest room ${ROOM_BY_ID[chosenPathInfo.roomId]?.name || chosenPathInfo.roomId} for direct inspection.`;
           }
-        } else {
+        } else if (candidatePaths.length > 0) {
           candidatePaths.sort((a, b) => a.distance - b.distance);
           chosenPathInfo = candidatePaths[0];
           decisionReasoning = `targets closest room ${ROOM_BY_ID[chosenPathInfo.roomId]?.name || chosenPathInfo.roomId} as fallback.`;
@@ -561,7 +576,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
             unruledOutCandidates.sort((a, b) => a.distance - b.distance);
             chosenPathInfo = unruledOutCandidates[0];
             decisionReasoning = `cunningly targets ${ROOM_BY_ID[chosenPathInfo.roomId]?.name || chosenPathInfo.roomId} to extract key clues.`;
-          } else {
+          } else if (candidatePaths.length > 0) {
             candidatePaths.sort((a, b) => a.distance - b.distance);
             chosenPathInfo = candidatePaths[0];
             decisionReasoning = `targets closest room ${ROOM_BY_ID[chosenPathInfo.roomId]?.name || chosenPathInfo.roomId} as fallback.`;
@@ -582,17 +597,19 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         }
       }
 
-      let path: Position[] | null = null;
+      let finalPath: Position[];
+
       if (chosenPathInfo) {
-        path = chosenPathInfo.path;
+        // A reachable room was found within the dice roll.
+        // Truncate the path to exactly `roll` steps (entering a room terminates movement,
+        // per Cluedo rules any remaining steps after entering a room are forfeit).
+        finalPath = chosenPathInfo.path.slice(0, roll + 1);
+      } else {
+        // No room is reachable within this dice roll — the agent must spend ALL roll steps
+        // walking the hallway (bouncing back-and-forth at dead-ends).
+        decisionReasoning = decisionReasoning || `no room reachable in ${roll} steps — pacing the hallway to use all moves.`;
+        finalPath = walkFullSteps(detective.position, roll, occupiedCells);
       }
-
-      if (!path || path.length === 0) {
-        const fallback: Position = { x: detective.position.x, y: Math.max(0, detective.position.y - roll) };
-        path = findPath(detective.position, fallback) ?? [detective.position];
-      }
-
-      const clampedPath = path.slice(0, roll + 1);
 
       // 2. Upload movement path metadata to 0G Storage
       const storageRes = await fetch("/api/storage/upload", {
@@ -600,7 +617,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           key: `move-${gameId}-${round}-${turn}`,
-          data: { detective: activeId, roll, path: clampedPath },
+          data: { detective: activeId, roll, path: finalPath },
         }),
       });
       const storageData = await storageRes.json();
@@ -613,7 +630,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
       set({
         diceRoll: roll,
         actionState: "moving",
-        movementPath: clampedPath,
+        movementPath: finalPath,
         movementStep: 0,
         isSyncing: false,
         syncMessage: null,
@@ -628,7 +645,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
       get().addLog(
         activeId,
         "ROLL",
-        `Rolled a ${roll}. Moving ${clampedPath.length - 1} step(s).`,
+        `Rolled a ${roll}. Moving ${finalPath.length - 1} step(s).`,
         chainData.txHash,
         storageData.rootHash,
         storageData.txSeq

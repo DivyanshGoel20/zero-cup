@@ -65,17 +65,24 @@ export const BoardCell = memo(function BoardCell({
 
   switch (cellType) {
     case "hallway":
+      const isEven = (x + y) % 2 === 0;
       bg = isHighlighted
-        ? "radial-gradient(circle, rgba(212,175,55,0.7) 0%, rgba(184,146,85,0.3) 60%, rgba(184,146,85,0.1) 100%)"
-        : "radial-gradient(circle at center, rgba(255,255,255,0.03) 0%, rgba(0,0,0,0.25) 100%)";
-      border = isHighlighted ? "border-[#d4af37] border-2 shadow-[0_0_12px_rgba(212,175,55,0.85)] z-20" : "border-white/[0.04]";
+        ? "radial-gradient(circle, rgba(212,175,55,0.75) 0%, rgba(184,146,85,0.35) 60%, rgba(184,146,85,0.15) 100%)"
+        : isEven
+        ? "linear-gradient(135deg, rgba(80,48,24,0.38) 0%, rgba(50,28,10,0.28) 100%)"
+        : "linear-gradient(135deg, rgba(55,32,14,0.28) 0%, rgba(35,18,6,0.38) 100%)";
+      border = isHighlighted
+        ? "border-[#d4af37] border-2 shadow-[0_0_12px_rgba(212,175,55,0.85)] z-20"
+        : isEven
+        ? "border-[#6b3e1a]/30"
+        : "border-[#4a2a0e]/20";
       break;
     case "door":
       bg = isHighlighted
         ? "radial-gradient(circle, rgba(212,175,55,0.85) 0%, rgba(184,146,85,0.4) 60%, rgba(184,146,85,0.15) 100%)"
-        : (roomId ? "rgba(184,146,85,0.15)" : "rgba(255,255,255,0.06)");
-      border = isHighlighted ? "border-[#d4af37] border-2 shadow-[0_0_12px_rgba(212,175,55,0.9)] z-20" : "border-[#b89255]/40 border-dashed border-2";
-      extraClass = isHighlighted ? "" : "ring-1 ring-[#b89255]/30 shadow-[inset_0_0_8px_rgba(184,146,85,0.15)]";
+        : "rgba(184,146,85,0.06)";
+      border = isHighlighted ? "border-[#d4af37] border-2 shadow-[0_0_12px_rgba(212,175,55,0.9)] z-20" : "border-[#b89255]/50 border-dashed border-[1.5px]";
+      extraClass = isHighlighted ? "" : "shadow-[inset_0_0_6px_rgba(184,146,85,0.1)]";
       break;
     case "wall":
       bg = "transparent";
@@ -91,11 +98,13 @@ export const BoardCell = memo(function BoardCell({
 
   // Draw room background and borders (thick walls) for rooms
   if (roomId) {
-    if (!isHighlighted || cellType !== "room_center") {
-      bg = ROOM_GRADIENTS[roomId];
+    if (isHighlighted && cellType === "room_center") {
+      bg = "radial-gradient(circle, rgba(212,175,55,0.55) 0%, rgba(184,146,85,0.2) 60%, transparent 100%)";
+    } else {
+      bg = "transparent";
     }
     if (roomConfig && cellType !== "door") {
-      const borderTheme = "3px solid #5a3e1a"; // Mahogany wood walls
+      const borderTheme = "2px solid #5a3e1a"; // Mahogany wood walls
       if (x === roomConfig.minX) borderStyle.borderLeft = borderTheme;
       if (x === roomConfig.maxX) borderStyle.borderRight = borderTheme;
       if (y === roomConfig.minY) borderStyle.borderTop = borderTheme;
@@ -122,10 +131,18 @@ export const BoardCell = memo(function BoardCell({
       )}
 
       {cellType === "door" && (
-        <span
-          className="absolute inset-0 flex items-center justify-center pointer-events-none text-[8px] sm:text-[10px] text-amber-500/90 filter drop-shadow-[0_1px_1px_rgba(0,0,0,0.5)] animate-pulse"
-        >
-          🚪
+        <span className="absolute inset-0 flex items-center justify-center pointer-events-none drop-shadow-[0_1px_2px_rgba(0,0,0,0.85)]">
+          <svg
+            viewBox="0 0 24 24"
+            className="w-3.5 h-3.5 text-[#e2c185] animate-pulse"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M5 20V8a7 7 0 0 1 14 0v12M3 20h18M12 11h.01" />
+          </svg>
         </span>
       )}
 

@@ -98,12 +98,32 @@ body {
    ============================================================ */
 
 .board-felt {
-  background:
-    radial-gradient(circle at center, #193421 0%, #0d1e13 65%, #050a07 100%);
+  /* Rich dark mahogany parquet floor — repeating herringbone plank pattern */
+  background-color: #0c0906;
+  background-image:
+    /* Primary plank grain lines (horizontal) */
+    repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 10px,
+      rgba(255,255,255,0.018) 10px,
+      rgba(255,255,255,0.018) 11px
+    ),
+    /* Secondary plank grain lines (vertical offset) */
+    repeating-linear-gradient(
+      90deg,
+      transparent,
+      transparent 22px,
+      rgba(255,255,255,0.012) 22px,
+      rgba(255,255,255,0.012) 23px
+    ),
+    /* Warm wood tone base */
+    radial-gradient(ellipse at center, #1a100a 0%, #0e0804 55%, #070503 100%);
   box-shadow:
-    inset 0 0 80px rgba(0, 0, 0, 0.95),
-    inset 0 0 30px rgba(0, 0, 0, 0.85);
-  border: 1px solid rgba(184, 146, 85, 0.2);
+    inset 0 0 60px rgba(0, 0, 0, 0.92),
+    inset 0 0 20px rgba(0, 0, 0, 0.8),
+    inset 2px 2px 8px rgba(255,255,255,0.015);
+  border: 1px solid rgba(184, 146, 85, 0.18);
 }
 
 /* ============================================================
@@ -111,14 +131,29 @@ body {
    ============================================================ */
 
 .board-frame {
-  background: linear-gradient(135deg, #180f08 0%, #2a1b0f 50%, #180f08 100%);
-  border: 8px solid #2f1d10;
-  outline: 2px solid #b89255;
-  outline-offset: -10px;
+  background: 
+    linear-gradient(135deg, #1a0f07 0%, #2e1c0d 30%, #1a0f07 50%, #261608 75%, #1a0f07 100%);
+  border: 10px solid transparent;
+  border-image: linear-gradient(
+    135deg,
+    #4a2c0e 0%,
+    #8b5e28 20%,
+    #c49a4a 35%,
+    #b89255 45%,
+    #d4af6a 50%,
+    #b89255 55%,
+    #c49a4a 65%,
+    #8b5e28 80%,
+    #4a2c0e 100%
+  ) 1;
+  outline: 1.5px solid rgba(184,146,85,0.4);
+  outline-offset: -12px;
   box-shadow:
-    0 25px 60px rgba(0, 0, 0, 0.95),
-    inset 0 0 25px rgba(0, 0, 0, 0.95),
-    0 4px 12px rgba(184, 146, 85, 0.06);
+    0 30px 80px rgba(0, 0, 0, 0.97),
+    0 10px 30px rgba(0, 0, 0, 0.85),
+    inset 0 0 30px rgba(0, 0, 0, 0.95),
+    inset 0 2px 4px rgba(255,255,255,0.04),
+    0 4px 16px rgba(184, 146, 85, 0.08);
 }
 
 /* ============================================================

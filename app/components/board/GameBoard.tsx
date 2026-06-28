@@ -60,6 +60,53 @@ export function GameBoard({
           gridTemplateRows: `repeat(${BOARD_SIZE}, 1fr)`,
         }}
       >
+        {/* Room Background Art Layer */}
+        <div className="absolute inset-0 pointer-events-none z-0">
+          {ROOMS.map((room) => {
+            const left = (room.minX / BOARD_SIZE) * 100;
+            const top = (room.minY / BOARD_SIZE) * 100;
+            const width = ((room.maxX - room.minX + 1) / BOARD_SIZE) * 100;
+            const height = ((room.maxY - room.minY + 1) / BOARD_SIZE) * 100;
+
+            const imageMap: Record<string, string> = {
+              BILLIARD_ROOM: "/room_billiard_room.png",
+              CONSERVATORY: "/room_conservatory.png",
+              LIBRARY: "/room_library.png",
+              WINE_CELLAR: "/room_wine_cellar.png",
+              GRAND_FOYER: "/room_grand_foyer.png",
+              MASTER_BEDROOM: "/room_master_bedroom.png",
+              KITCHEN: "/room_kitchen.png",
+              DINING_HALL: "/room_dining_hall.png",
+              SECRET_STUDY: "/room_secret_study.png",
+            };
+
+            return (
+              <div
+                key={`bg-${room.id}`}
+                className="absolute overflow-hidden rounded-md transition-all duration-300"
+                style={{
+                  left: `${left}%`,
+                  top: `${top}%`,
+                  width: `${width}%`,
+                  height: `${height}%`,
+                  backgroundImage: `url(${imageMap[room.id] || "/room_card_bg.png"})`,
+                  backgroundSize: "cover",
+                  backgroundPosition: "center",
+                  boxShadow: "inset 0 0 30px rgba(0,0,0,0.85)",
+                }}
+              >
+                {/* Dark Vignette Overlay for Pawn visibility & contrast */}
+                <div
+                  className="absolute inset-0"
+                  style={{
+                    background: "radial-gradient(circle, rgba(15,23,42,0.15) 0%, rgba(8,12,21,0.65) 100%)",
+                  }}
+                />
+              </div>
+            );
+          })}
+        </div>
+
         {/* Room Labels Layer */}
         <div className="absolute inset-0 pointer-events-none z-10">
           {ROOMS.map((room) => {
@@ -70,23 +117,28 @@ export function GameBoard({
 
             return (
               <div
-                key={room.id}
-                className="absolute flex items-center justify-center text-center font-bold pointer-events-none select-none serif-title uppercase"
+                key={`label-${room.id}`}
+                className="absolute flex items-center justify-center pointer-events-none select-none"
                 style={{
                   left: `${left}%`,
                   top: `${top}%`,
                   width: `${width}%`,
                   height: `${height}%`,
-                  fontSize: "clamp(7px, 1.25vw, 12px)",
-                  color: "rgba(255, 255, 255, 0.72)",
-                  letterSpacing: "0.06em",
-                  textShadow: "0 2px 4px rgba(0,0,0,0.85)",
-                  lineHeight: 1.2,
-                  whiteSpace: "pre-line",
-                  padding: "6px",
                 }}
               >
-                {room.name}
+                {/* Burnished brass plaque */}
+                <div
+                  className="px-2.5 py-1 rounded bg-[#0b0c10]/90 border-y border-[#b89255]/40 shadow-[0_3px_8px_rgba(0,0,0,0.7)] font-bold text-center uppercase tracking-wider serif-title text-[#e2c185] backdrop-blur-[1px] select-none"
+                  style={{
+                    fontSize: "clamp(6px, 1.2vw, 9px)",
+                    letterSpacing: "0.1em",
+                    borderInlineWidth: "3px",
+                    borderInlineColor: "#b89255",
+                    textShadow: "0 1px 2px rgba(0,0,0,0.6)",
+                  }}
+                >
+                  {room.name}
+                </div>
               </div>
             );
           })}
