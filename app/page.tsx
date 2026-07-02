@@ -13,7 +13,7 @@ import { ConspiracyWeb } from "./components/spectator/ConspiracyWeb";
 import { DETECTIVES, DETECTIVE_BY_ID, WEAPON_BY_ID, WEAPONS, ROOMS } from "@/lib/game/constants";
 import type { DetectiveId, WeaponId, RoomId, Position, Card, CustomDetectiveConfig } from "@/lib/game/types";
 import { runDeductionAnalysis, checkAIAccusationDecision } from "@/lib/game/deduction";
-import { getReachableCells } from "@/lib/game/board";
+import { getReachableCells, findPath } from "@/lib/game/board";
 import { motion, AnimatePresence } from "framer-motion";
 import { Trophy, Activity, Users, HelpCircle, AlertTriangle } from "lucide-react";
 import { soundManager } from "@/lib/game/sound";
@@ -89,6 +89,7 @@ export default function Home() {
     envelope,
     initGame,
     rollDiceAction,
+    stayInRoomAction,
     stepMovement,
     makeSuggestion,
     makeAccusation,
@@ -128,6 +129,14 @@ export default function Home() {
   const [accusationSuspect, setAccusationSuspect] = useState<DetectiveId>("VANCE");
   const [accusationWeapon, setAccusationWeapon] = useState<WeaponId>("PEARL_PISTOL");
   const [accusationRoom, setAccusationRoom] = useState<RoomId>("GRAND_FOYER");
+
+  // Local state for tracking exit door selection when human starts turn inside a room
+  const [selectedDoor, setSelectedDoor] = useState<Position | null>(null);
+
+  // Reset selected door when turn changes or action state resets
+  useEffect(() => {
+    setSelectedDoor(null);
+  }, [currentDetectiveIndex, actionState]);
 
   // Local state for Custom Detective Creator
   const [customDetective, setCustomDetective] = useState<CustomDetectiveConfig | null>(null);
@@ -317,11 +326,44 @@ export default function Home() {
   const isHumanMoving = isHumanTurn && actionState === "moving" && movementPath.length === 0;
 
   const reachableCells = useMemo(() => {
-    if (isHumanMoving && activeDetective && diceRoll !== null) {
+    if (!isHumanMoving || !activeDetective || diceRoll === null) {
+      return [];
+    }
+
+    if (activeDetective.currentRoom) {
+      const roomConfig = ROOMS.find((r) => r.id === activeDetective.currentRoom);
+      const doors = roomConfig ? [...roomConfig.doors] : [];
+
+      if (!selectedDoor) {
+        // Highlight all doors of the room AND all cells reachable from ANY of those doors within diceRoll steps
+        const combined: Position[] = [];
+        doors.forEach((door) => {
+          if (!combined.some((c) => c.x === door.x && c.y === door.y)) {
+            combined.push(door);
+          }
+          const cellsFromDoor = getReachableCells(door, diceRoll);
+          cellsFromDoor.forEach((cell) => {
+            if (!combined.some((c) => c.x === cell.x && c.y === cell.y)) {
+              combined.push(cell);
+            }
+          });
+        });
+        return combined;
+      } else {
+        // Highlight cells reachable from the selected door + the doors themselves (to switch exits)
+        const cellsFromDoor = getReachableCells(selectedDoor, diceRoll);
+        const combined = [...cellsFromDoor];
+        doors.forEach((d) => {
+          if (!combined.some((c) => c.x === d.x && c.y === d.y)) {
+            combined.push(d);
+          }
+        });
+        return combined;
+      }
+    } else {
       return getReachableCells(activeDetective.position, diceRoll);
     }
-    return [];
-  }, [isHumanMoving, activeDetective, diceRoll]);
+  }, [isHumanMoving, activeDetective, diceRoll, selectedDoor]);
 
   // Note: key pairs are generated inside the store's initGame action
 
@@ -342,15 +384,31 @@ export default function Home() {
     let timer: NodeJS.Timeout;
 
     if (actionState === "idle") {
-      // Step A: Wait briefly, then animate & roll dice
-      timer = setTimeout(() => {
-        setDiceAnimating(true);
-        // Wait 700ms for dice animation, then complete roll
+      const activeId = detectiveOrder[currentDetectiveIndex];
+      const detective = detectives.find((d) => d.id === activeId);
+      const notebook = notebooks[activeId];
+
+      const shouldAIStay =
+        activeId !== humanDetectiveId &&
+        detective?.currentRoom &&
+        notebook &&
+        notebook.rooms[detective.currentRoom] === "POSSIBLE";
+
+      if (shouldAIStay) {
         timer = setTimeout(() => {
-          setDiceAnimating(false);
-          rollDiceAction();
-        }, 700);
-      }, msPerStep * 2.5);
+          stayInRoomAction();
+        }, msPerStep * 2.5);
+      } else {
+        // Step A: Wait briefly, then animate & roll dice
+        timer = setTimeout(() => {
+          setDiceAnimating(true);
+          // Wait 700ms for dice animation, then complete roll
+          timer = setTimeout(() => {
+            setDiceAnimating(false);
+            rollDiceAction();
+          }, 700);
+        }, msPerStep * 2.5);
+      }
     } else if (actionState === "moving") {
       // Step B: Traverse path step-by-step
       timer = setTimeout(() => {
@@ -441,6 +499,11 @@ export default function Home() {
       case "rolling":
         return `${activeDetective.name} is shaking the dice...`;
       case "moving":
+        if (isHumanTurn && activeDetective.currentRoom && movementPath.length === 0) {
+          return selectedDoor
+            ? `Exiting via door (${selectedDoor.x}, ${selectedDoor.y}). Select a highlighted tile to move.`
+            : `Exit the room: Select which door to walk out from.`;
+        }
         return `${activeDetective.name} is walking hallways (${movementStep}/${movementPath.length - 1})...`;
       case "suggesting":
         return `${activeDetective.name} is gathering clues in the ${activeDetective.currentRoom?.replace(/_/g, " ")}...`;
@@ -936,8 +999,41 @@ export default function Home() {
                     : []
                 }
                 onCellClick={(pos) => {
-                  if (isHumanMoving) {
-                    moveHumanAction(pos);
+                  if (isHumanMoving && activeDetective && diceRoll !== null) {
+                    if (activeDetective.currentRoom) {
+                      const roomConfig = ROOMS.find((r) => r.id === activeDetective.currentRoom);
+                      const isDoor = roomConfig?.doors.some((d) => d.x === pos.x && d.y === pos.y);
+
+                      if (isDoor) {
+                        if (!selectedDoor || selectedDoor.x !== pos.x || selectedDoor.y !== pos.y) {
+                          // Select (or switch to) this door
+                          setSelectedDoor(pos);
+                        } else {
+                          // Clicked the already selected door, execute movement to it
+                          moveHumanAction(pos, selectedDoor);
+                          setSelectedDoor(null);
+                        }
+                      } else {
+                        // Clicked a reachable cell
+                        let startDoor = selectedDoor;
+                        if (!startDoor && roomConfig) {
+                          // Find a door from which this cell is reachable within diceRoll steps
+                          const possibleDoors = roomConfig.doors.filter((d) => {
+                            const p = findPath(d, pos);
+                            return p && (p.length - 1) <= diceRoll;
+                          });
+                          if (possibleDoors.length > 0) {
+                            startDoor = possibleDoors[0];
+                          }
+                        }
+                        if (startDoor) {
+                          moveHumanAction(pos, startDoor);
+                          setSelectedDoor(null);
+                        }
+                      }
+                    } else {
+                      moveHumanAction(pos);
+                    }
                   }
                 }}
               />
@@ -955,7 +1051,16 @@ export default function Home() {
               </div>
 
               {/* Dice box */}
-              <div className="shrink-0">
+              <div className="shrink-0 flex flex-col items-center gap-3">
+                {isHumanTurn && actionState === "idle" && activeDetective?.currentRoom && (
+                  <button
+                    disabled={isSyncing}
+                    onClick={stayInRoomAction}
+                    className="px-4 py-2 bg-[#b89255]/10 border border-[#b89255]/40 hover:border-[#b89255] text-[#b89255] hover:text-white font-bold font-mono text-[10px] tracking-wider uppercase rounded-xl transition-all hover:scale-102 active:scale-98 cursor-pointer w-full text-center"
+                  >
+                    🚪 Stay In Room
+                  </button>
+                )}
                 <DiceDisplay
                   value={diceRoll}
                   isAnimating={isDiceAnimating}
@@ -1451,10 +1556,52 @@ export default function Home() {
                     {(() => {
                       const humanDet = detectives.find((d) => d.id === humanDetectiveId);
                       if (!humanDet) return null;
+                      
+                      const storeNotebook = notebooks[humanDetectiveId];
+                      if (!storeNotebook) return null;
+
+                      // Merge manual checklist markings into the store notebook
+                      const mergedNotebook = {
+                        suspects: { ...storeNotebook.suspects },
+                        weapons: { ...storeNotebook.weapons },
+                        rooms: { ...storeNotebook.rooms },
+                      };
+
+                      // Overwrite with manual checklist markings if the card is not already known (held by me/other)
+                      Object.keys(mergedNotebook.suspects).forEach((id) => {
+                        const status = mergedNotebook.suspects[id as DetectiveId];
+                        const manualStatus = manualNotebook[id];
+                        if (status !== "HELD_BY_ME" && status !== "HELD_BY_OTHER") {
+                          if (manualStatus === "ELIMINATED") {
+                            mergedNotebook.suspects[id as DetectiveId] = "ELIMINATED";
+                          }
+                        }
+                      });
+
+                      Object.keys(mergedNotebook.weapons).forEach((id) => {
+                        const status = mergedNotebook.weapons[id as WeaponId];
+                        const manualStatus = manualNotebook[id];
+                        if (status !== "HELD_BY_ME" && status !== "HELD_BY_OTHER") {
+                          if (manualStatus === "ELIMINATED") {
+                            mergedNotebook.weapons[id as WeaponId] = "ELIMINATED";
+                          }
+                        }
+                      });
+
+                      Object.keys(mergedNotebook.rooms).forEach((id) => {
+                        const status = mergedNotebook.rooms[id as RoomId];
+                        const manualStatus = manualNotebook[id];
+                        if (status !== "HELD_BY_ME" && status !== "HELD_BY_OTHER") {
+                          if (manualStatus === "ELIMINATED") {
+                            mergedNotebook.rooms[id as RoomId] = "ELIMINATED";
+                          }
+                        }
+                      });
+
                       return (
                         <ConspiracyWeb
                           detective={humanDet}
-                          notebook={notebooks[humanDetectiveId]}
+                          notebook={mergedNotebook}
                         />
                       );
                     })()}

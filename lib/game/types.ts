@@ -160,6 +160,8 @@ export interface LogEntry {
   readonly rootHash?: string; // 0G Storage root hash if persisted
   readonly txHash?: string;   // 0G Chain tx hash if recorded on-chain
   readonly txSeq?: number;    // 0G Storage tx sequence number
+  readonly suggestion?: Suggestion;
+  readonly revealedCard?: Card;
 }
 
 // ============================================================

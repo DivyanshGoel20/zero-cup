@@ -110,8 +110,9 @@ export interface GameState {
 export interface GameActions {
   initGame: (selectedHumanId?: DetectiveId | null, customConfig?: CustomDetectiveConfig | null) => Promise<void>;
   rollDiceAction: () => Promise<void>;
+  stayInRoomAction: () => Promise<void>;
   stepMovement: () => void;
-  moveHumanAction: (targetPos: Position) => void;
+  moveHumanAction: (targetPos: Position, startFromDoor?: Position) => Promise<void>;
   makeSuggestion: () => Promise<void>;
   makeHumanSuggestion: (suggestion: Suggestion) => Promise<void>;
   resolveHumanDisproval: (card: Card) => Promise<void>;
@@ -123,7 +124,9 @@ export interface GameActions {
     details: string,
     txHash?: string,
     rootHash?: string,
-    txSeq?: number
+    txSeq?: number,
+    suggestion?: Suggestion,
+    revealedCard?: Card
   ) => void;
   fetchAIMonologue: (agentId: DetectiveId, context: string, action: string) => Promise<void>;
 }
@@ -457,23 +460,38 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
       // Compute paths to doors of OTHER rooms.
       // Only include doors that are (a) not occupied and (b) reachable within the dice roll.
       const currentRoomId = detective.currentRoom;
-      const candidatePaths: { roomId: RoomId; door: Position; distance: number; path: Position[]; score?: number }[] = [];
+      const candidatePaths: { roomId: RoomId; door: Position; distance: number; path: Position[]; score?: number; startDoor?: Position }[] = [];
+      
+      const startPositions: Position[] = [];
+      if (currentRoomId) {
+        const currentRoom = ROOMS.find(r => r.id === currentRoomId);
+        if (currentRoom) {
+          startPositions.push(...currentRoom.doors);
+        }
+      } else {
+        startPositions.push(detective.position);
+      }
+
       for (const room of ROOMS) {
         if (room.id === currentRoomId) continue;
         for (const door of room.doors) {
           // Skip doors occupied by another agent
           if (occupiedCells.has(`${door.x},${door.y}`)) continue;
-          const p = findPath(detective.position, door);
-          if (p && p.length > 1) {
-            const dist = p.length - 1;
-            // Only consider rooms we can actually reach within the roll
-            if (dist <= roll) {
-              candidatePaths.push({
-                roomId: room.id as RoomId,
-                door,
-                distance: dist,
-                path: p,
-              });
+          
+          for (const startPos of startPositions) {
+            const p = findPath(startPos, door);
+            if (p && p.length > 0) {
+              const dist = p.length - 1;
+              // Only consider rooms we can actually reach within the roll
+              if (dist <= roll) {
+                candidatePaths.push({
+                  roomId: room.id as RoomId,
+                  door,
+                  distance: dist,
+                  path: currentRoomId ? [detective.position, ...p] : p,
+                  startDoor: currentRoomId ? startPos : undefined,
+                });
+              }
             }
           }
         }
@@ -605,12 +623,20 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         // A reachable room was found within the dice roll.
         // Truncate the path to exactly `roll` steps (entering a room terminates movement,
         // per Cluedo rules any remaining steps after entering a room are forfeit).
-        finalPath = chosenPathInfo.path.slice(0, roll + 1);
+        // Since we prepended the room center if currentRoomId is not null, the path length increases by 1.
+        // Therefore, slice up to roll + 2 if currentRoomId is set, otherwise roll + 1.
+        finalPath = chosenPathInfo.path.slice(0, currentRoomId ? roll + 2 : roll + 1);
       } else {
         // No room is reachable within this dice roll — the agent must spend ALL roll steps
         // walking the hallway (bouncing back-and-forth at dead-ends).
         decisionReasoning = decisionReasoning || `no room reachable in ${roll} steps — pacing the hallway to use all moves.`;
-        finalPath = walkFullSteps(detective.position, roll, occupiedCells);
+        if (currentRoomId && startPositions.length > 0) {
+          const startDoor = startPositions[0];
+          const walkPath = walkFullSteps(startDoor, roll, occupiedCells);
+          finalPath = [detective.position, ...walkPath];
+        } else {
+          finalPath = walkFullSteps(detective.position, roll, occupiedCells);
+        }
       }
 
       // 2. Upload movement path metadata to 0G Storage
@@ -654,6 +680,58 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
       );
     } catch (err: any) {
       console.error("[0G Move] Dice roll sync failed:", err);
+      set({
+        isSyncing: false,
+        syncMessage: null,
+        error: err?.message || String(err),
+      });
+    }
+  },
+
+  stayInRoomAction: async () => {
+    const { actionState, currentDetectiveIndex, detectiveOrder, detectives, gameId, round, turn, isSyncing } = get();
+    if (actionState !== "idle" || isSyncing) return;
+
+    const activeId = detectiveOrder[currentDetectiveIndex];
+    const detective = detectives.find((d) => d.id === activeId)!;
+    if (!detective.currentRoom) return;
+
+    set({
+      isSyncing: true,
+      syncMessage: "Recording stay in room on 0G Galileo blockchain...",
+      error: null,
+    });
+
+    try {
+      // 1. Anchor stay-in-room decision to 0G Chain
+      const chainRes = await fetch("/api/chain/record", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "STAY_IN_ROOM",
+          data: { gameId, round, turn, detective: activeId, room: detective.currentRoom },
+        }),
+      });
+      const chainData = await chainRes.json();
+      if (!chainRes.ok || !chainData.ok) {
+        throw new Error(chainData.error || `Failed to record stay in room on 0G Chain: HTTP ${chainRes.status}`);
+      }
+
+      set({
+        actionState: "suggesting",
+        diceRoll: null,
+        isSyncing: false,
+        syncMessage: null,
+      });
+
+      get().addLog(
+        activeId,
+        "STAY_IN_ROOM",
+        `Decided to stay in the ${detective.currentRoom.replace(/_/g, " ")} to investigate further.`,
+        chainData.txHash
+      );
+    } catch (err: any) {
+      console.error("[0G Stay] Stay in room sync failed:", err);
       set({
         isSyncing: false,
         syncMessage: null,
@@ -715,7 +793,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
   },
 
   // ── Human Action: Click to move ─────────────────────────
-  moveHumanAction: async (targetPos: Position) => {
+  moveHumanAction: async (targetPos: Position, startFromDoor?: Position) => {
     const { actionState, currentDetectiveIndex, detectives, detectiveOrder, diceRoll, gameId, round, turn, humanDetectiveId } = get();
     const activeId = detectiveOrder[currentDetectiveIndex];
     if (activeId !== humanDetectiveId || actionState !== "moving" || diceRoll === null) return;
@@ -723,11 +801,14 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
     const detective = detectives.find((d) => d.id === activeId)!;
 
     // Find path
-    const path = findPath(detective.position, targetPos);
-    if (!path || path.length === 0 || path.length - 1 > diceRoll) {
+    const startPos = startFromDoor || detective.position;
+    const pathFromStart = findPath(startPos, targetPos);
+    if (!pathFromStart || pathFromStart.length === 0 || pathFromStart.length - 1 > diceRoll) {
       // Too far or unreachable
       return;
     }
+
+    const path = startFromDoor ? [detective.position, ...pathFromStart] : pathFromStart;
 
     set({
       isSyncing: true,
@@ -959,7 +1040,8 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         `Suggests: ${suggestion.suspect} | ${suggestion.weapon} | ${suggestion.room}`,
         suggestChainData.txHash,
         suggestStorageData.rootHash,
-        suggestStorageData.txSeq
+        suggestStorageData.txSeq,
+        suggestion
       );
 
       soundManager.playSuggestion();
@@ -1066,7 +1148,9 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
           `Showed a card to ${activeId}. (Encrypted 0G Storage Clue Reveal)`,
           revealChainData.txHash,
           revealStorageData.rootHash,
-          revealStorageData.txSeq
+          revealStorageData.txSeq,
+          undefined,
+          card
         );
       } else {
         // No one could disprove
@@ -1198,7 +1282,8 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         `Suggests: ${suggestion.suspect} | ${suggestion.weapon} | ${suggestion.room}`,
         suggestChainData.txHash,
         suggestStorageData.rootHash,
-        suggestStorageData.txSeq
+        suggestStorageData.txSeq,
+        suggestion
       );
 
       soundManager.playSuggestion();
@@ -1281,7 +1366,9 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
           `Showed you the card: ${card.name}. (Decrypted from 0G Storage Clue Reveal)`,
           revealChainData.txHash,
           revealStorageData.rootHash,
-          revealStorageData.txSeq
+          revealStorageData.txSeq,
+          undefined,
+          card
         );
       } else {
         // No one could disprove
@@ -1426,7 +1513,9 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
         `You showed a card (${selectedCard.name}) to ${suggesterId}. (Encrypted Clue)`,
         revealChainData.txHash,
         revealStorageData.rootHash,
-        revealStorageData.txSeq
+        revealStorageData.txSeq,
+        undefined,
+        selectedCard
       );
     } catch (err: any) {
       console.error("[Human Disproval] Failed to resolve disproval:", err);
@@ -1550,7 +1639,7 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
   },
 
   // ── Log helper ───────────────────────────────────────────
-  addLog: (agentId, action, details, txHash, rootHash, txSeq) => {
+  addLog: (agentId, action, details, txHash, rootHash, txSeq, suggestion, revealedCard) => {
     const entry: LogEntry = {
       id: makeId(),
       timestamp: Date.now(),
@@ -1561,6 +1650,8 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
       txHash,
       rootHash,
       txSeq,
+      suggestion,
+      revealedCard,
     };
     set((s) => ({ log: [...s.log, entry] }));
   },

@@ -2,13 +2,122 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import type { LogEntry, DetectiveId } from "@/lib/game/types";
-import { DETECTIVE_BY_ID } from "@/lib/game/constants";
+import { DETECTIVE_BY_ID, WEAPON_BY_ID } from "@/lib/game/constants";
 import { useEffect, useRef } from "react";
 import { useGameStore } from "@/lib/store/gameStore";
+
+const getCardDetails = (id: string) => {
+  const cleanId = id.toUpperCase();
+  if (DETECTIVE_BY_ID[cleanId]) {
+    return {
+      type: "SUSPECT",
+      icon: "👤",
+      color: "text-[#a78bfa] border-[#a78bfa]/20",
+      image: `/detective_${cleanId.toLowerCase()}.png`
+    };
+  }
+  if (WEAPON_BY_ID[cleanId]) {
+    let suffix = cleanId.toLowerCase();
+    if (suffix.includes("pistol")) suffix = "pistol";
+    else if (suffix.includes("opener")) suffix = "opener";
+    else if (suffix.includes("strychnine")) suffix = "strychnine";
+    else if (suffix.includes("clock")) suffix = "clock";
+    else if (suffix.includes("tie")) suffix = "tie";
+    else if (suffix.includes("cane")) suffix = "cane";
+
+    return {
+      type: "WEAPON",
+      icon: "🗡️",
+      color: "text-[#f59e0b] border-[#f59e0b]/20",
+      image: `/weapon_${suffix}.png`
+    };
+  }
+  const ROOM_IDS = [
+    "BILLIARD_ROOM",
+    "CONSERVATORY",
+    "LIBRARY",
+    "WINE_CELLAR",
+    "GRAND_FOYER",
+    "MASTER_BEDROOM",
+    "KITCHEN",
+    "DINING_HALL",
+    "SECRET_STUDY"
+  ];
+  if (ROOM_IDS.includes(cleanId)) {
+    return {
+      type: "ROOM",
+      icon: "🚪",
+      color: "text-[#06b6d4] border-[#06b6d4]/20",
+      image: `/room_${cleanId.toLowerCase()}.png`
+    };
+  }
+  return {
+    type: "ROOM",
+    icon: "🚪",
+    color: "text-[#06b6d4] border-[#06b6d4]/20",
+    image: "/room_card_bg.png"
+  };
+};
+
+interface SmallCardProps {
+  cardId: string;
+  cardName: string;
+}
+
+function SmallCard({ cardId, cardName }: SmallCardProps) {
+  const details = getCardDetails(cardId);
+  const displayName = cardId === "VANCE" || cardId === "ROSEWOOD" || cardId === "BLACKWOOD" || cardId === "STERLING" || cardId === "ASHCROFT"
+    ? cardName
+    : cardName.replace(/_/g, " ");
+
+  return (
+    <div
+      className="relative w-[65px] h-[90px] rounded-lg border overflow-hidden shrink-0 shadow-md bg-slate-950 flex flex-col justify-between p-1.5 group select-none"
+      style={{
+        borderColor:
+          details.type === "SUSPECT"
+            ? "rgba(167,139,250,0.3)"
+            : details.type === "WEAPON"
+            ? "rgba(245,158,11,0.3)"
+            : "rgba(6,182,212,0.3)",
+      }}
+    >
+      {/* Background artwork */}
+      <div
+        className="absolute inset-0 bg-cover bg-center pointer-events-none opacity-85 transition-transform duration-300 group-hover:scale-105"
+        style={{ backgroundImage: `url(${details.image})` }}
+      />
+      {/* Gradients */}
+      <div className="absolute inset-0 bg-gradient-to-b from-black/70 via-transparent to-black/90 pointer-events-none z-10" />
+
+      {/* Top label */}
+      <div
+        className={`flex items-center justify-between text-[6.5px] font-mono font-bold uppercase tracking-wider z-20 ${
+          details.type === "SUSPECT"
+            ? "text-[#a78bfa]"
+            : details.type === "WEAPON"
+            ? "text-[#f59e0b]"
+            : "text-[#06b6d4]"
+        }`}
+      >
+        <span>{details.type}</span>
+        <span>{details.icon}</span>
+      </div>
+
+      <div className="flex-1" />
+
+      {/* Name */}
+      <div className="text-[7.5px] font-serif font-black uppercase text-center leading-tight tracking-wider text-white border-t border-white/10 pt-1 z-20 w-full truncate" title={displayName}>
+        {displayName}
+      </div>
+    </div>
+  );
+}
 
 const ACTION_STYLES: Record<string, { label: string; color: string }> = {
   GAME_START:     { label: "START",    color: "#10b981" },
   ROLL:           { label: "ROLL",     color: "#b89255" },
+  STAY_IN_ROOM:   { label: "STAY",     color: "#06b6d4" },
   ENTER_ROOM:     { label: "ENTER",    color: "#06b6d4" },
   SUGGEST:        { label: "SUGGEST",  color: "#8b5cf6" },
   DISPROVE:       { label: "DISPROVE", color: "#f59e0b" },
@@ -28,7 +137,7 @@ interface ActivityFeedProps {
 
 export function ActivityFeed({ log }: ActivityFeedProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
-  const { detectives } = useGameStore();
+  const { detectives, humanDetectiveId } = useGameStore();
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -115,7 +224,41 @@ export function ActivityFeed({ log }: ActivityFeedProps) {
                       </span>
                     </div>
                   )}
-                  <p className="text-[10px] text-[#94a3b8] leading-snug">{displayDetails}</p>
+                   <p className="text-[10px] text-[#94a3b8] leading-snug">{displayDetails}</p>
+
+                  {/* Suggestion Card Previews */}
+                  {entry.action === "SUGGEST" && entry.suggestion && (
+                    <div className="flex gap-2 mt-2 pt-1 border-t border-white/[0.03] overflow-x-auto pb-1 scrollbar-thin">
+                      <SmallCard cardId={entry.suggestion.suspect} cardName={getDetName(entry.suggestion.suspect)} />
+                      <SmallCard cardId={entry.suggestion.weapon} cardName={entry.suggestion.weapon.replace(/_/g, " ")} />
+                      <SmallCard cardId={entry.suggestion.room} cardName={entry.suggestion.room.replace(/_/g, " ")} />
+                    </div>
+                  )}
+
+                  {/* Reveal Clue Card Preview */}
+                  {entry.action === "DISPROVE" && entry.revealedCard && (
+                    (() => {
+                      const isVisibleReveal = 
+                        humanDetectiveId === null || // Spectator Mode
+                        entry.agentId === humanDetectiveId || // Human is disprover
+                        entry.details.toLowerCase().includes("showed you the card"); // Human is recipient
+                      
+                      if (!isVisibleReveal) return null;
+
+                      return (
+                        <div className="flex gap-2 mt-2 pt-1 border-t border-white/[0.03] overflow-x-auto pb-1 scrollbar-thin">
+                          <SmallCard
+                            cardId={entry.revealedCard.id}
+                            cardName={
+                              entry.revealedCard.type === "detective"
+                                ? getDetName(entry.revealedCard.id)
+                                : entry.revealedCard.name
+                            }
+                          />
+                        </div>
+                      );
+                    })()
+                  )}
                   
                   {/* Explorer links */}
                   {(entry.txHash || entry.rootHash || entry.txSeq !== undefined) && (
